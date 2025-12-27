@@ -30,3 +30,6 @@ Thumbs.db
 dist/
 build/
 
+# Local whatsapp-web.js fork (if using local version, otherwise use npm package)
+whatsapp-web.js/
+
