@@ -65,8 +65,16 @@ router.post('/instances', async (req, res) => {
       ));
     }
 
-    // Get webhook config from request body if provided
+    // Get webhook config from request body (required)
     const webhookConfig = req.body.webhook || {};
+    
+    // Validate that webhook URL is provided
+    if (!webhookConfig.url || typeof webhookConfig.url !== 'string') {
+      return res.status(400).json(createErrorResponse(
+        'Webhook URL is required. Provide it in webhook.url field when creating the instance.',
+        400
+      ));
+    }
 
     // Create session
     const session = await sessionManager.createSession(sessionId, name, webhookConfig);

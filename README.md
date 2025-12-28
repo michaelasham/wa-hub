@@ -39,16 +39,22 @@ cp .env.example .env
 ```env
 PORT=3000
 API_KEY=f0bdaeb85348f62f9d415e8bd749d251f5634e292ec61d7a133cd32ad71f1662
-MAIN_APP_WEBHOOK_BASE=https://your-app.com/webhooks/waapi
 WEBHOOK_SECRET=your-shared-secret-here
+CHROME_PATH=/usr/bin/chromium-browser
 SESSION_DATA_PATH=./.wwebjs_auth
 LOG_LEVEL=info
 ```
 
-**Note:** A random API key has been generated for you. Use the one above or generate a new one:
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
+**Notes:** 
+- A random API key has been generated for you. Use the one above or generate a new one:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
+- `CHROME_PATH` should point to your system's Chromium/Chrome. Common paths:
+  - `/usr/bin/chromium-browser` (Ubuntu/Debian)
+  - `/usr/bin/chromium` (some distributions)
+  - `/usr/bin/google-chrome` (if using Chrome)
+- Each instance must provide its own `webhook.url` when creating (no default webhook URL)
 
 ## Environment Variables
 
@@ -56,8 +62,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 |----------|-------------|---------|----------|
 | `PORT` | Server port | `3000` | No |
 | `API_KEY` | API key for authentication (required for all endpoints except `/health`) | - | Yes |
-| `MAIN_APP_WEBHOOK_BASE` | Base URL for webhook forwarding | - | Yes |
 | `WEBHOOK_SECRET` | Shared secret for webhook signature | - | Recommended |
+| `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
 
@@ -413,7 +419,7 @@ wa-hub/
 - Review authentication logs
 
 ### Webhook Not Received
-- Verify `MAIN_APP_WEBHOOK_BASE` is correctly configured
+- Verify that each instance has a webhook URL configured (no default URL)
 - Check that your webhook endpoint is accessible
 - Review service logs for webhook forwarding errors
 - Ensure webhook events are configured in instance settings

@@ -89,17 +89,26 @@ async function createSession(sessionId, name, webhookConfig = {}) {
   console.log(`[${sessionId}] Creating new session: ${name}`);
 
   const sessionInfo = new SessionInfo(sessionId, name);
-  sessionInfo.webhookUrl = webhookConfig.url || config.webhookBaseUrl;
+  // Each instance must provide its own webhook URL (no default)
+  if (!webhookConfig.url) {
+    throw new Error('Webhook URL is required. Provide it in the webhook.url field when creating the instance.');
+  }
+  sessionInfo.webhookUrl = webhookConfig.url;
   sessionInfo.webhookEvents = webhookConfig.events || [];
 
-  // Create WhatsApp client
+  // Create WhatsApp client using system Chromium
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: sessionId,
     }),
     puppeteer: {
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath: config.chromePath,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
     },
   });
 

@@ -70,7 +70,7 @@ const port = config.port;
 const server = app.listen(port, () => {
   console.log(`wa-hub service started on port ${port}`);
   console.log(`Health check: http://localhost:${port}/health`);
-  console.log(`Webhook base URL: ${config.webhookBaseUrl || 'Not configured'}`);
+  console.log('Webhook: Each instance must provide its own webhook URL');
   console.log('Press Ctrl+C to stop the server');
 });
 

@@ -19,14 +19,14 @@ const config = {
   // WhatsApp session storage path
   sessionDataPath: process.env.SESSION_DATA_PATH || './.wwebjs_auth',
   
+  // Chromium/Chrome executable path (for Puppeteer)
+  chromePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser', // Fallback: /usr/bin/chromium
+  
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',
 };
 
-// Validate required configuration
-if (!config.webhookBaseUrl) {
-  console.warn('WARNING: MAIN_APP_WEBHOOK_BASE not set. Webhook forwarding will be disabled.');
-}
+// No default webhook URL - each instance must specify its own webhook URL
 
 if (!config.webhookSecret) {
   console.warn('WARNING: WEBHOOK_SECRET not set. Webhook requests will not include shared secret header.');
