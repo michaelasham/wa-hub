@@ -237,12 +237,21 @@ function setupEventListeners(sessionId, client) {
     try {
       const voteData = {
         vote: {
+          // Phone number of the voter (normalized, without @c.us/@g.us)
           voter: extractPhoneNumber(vote.voter || vote.from || vote.chatId),
+          // Selected options (array of option names/labels)
           selectedOptions: vote.selectedOptions || vote.selected_options || vote.options || [],
-          timestamp: vote.timestamp || Date.now(),
+          // Timestamp of the vote (ms since epoch)
+          timestamp: vote.timestamp || vote.interractedAtTs || Date.now(),
+          // Poll message identifier (parent message key / id), for idempotency & correlation
+          pollMessageId:
+            (vote.parentMsgKey && (vote.parentMsgKey._serialized || vote.parentMsgKey.id || vote.parentMsgKey._serialized)) ||
+            (vote.parentMessage && vote.parentMessage.id && (vote.parentMessage.id._serialized || vote.parentMessage.id)) ||
+            (vote.id && (vote.id._serialized || vote.id)) ||
+            null,
         },
       };
-      
+
       await forwardWebhook(sessionId, 'vote_update', voteData);
     } catch (error) {
       console.error(`[${sessionId}] Error processing vote:`, error);
