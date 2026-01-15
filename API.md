@@ -323,3 +323,4 @@ All webhook requests include `x-wa-hub-signature` header with HMAC-SHA256 signat
 4. **QR Code:** Wait 10-15 seconds after instance creation before requesting QR code
 5. **HTTP Only:** This API uses HTTP (not HTTPS) - use for internal/trusted networks only
 
+

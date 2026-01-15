@@ -328,7 +328,16 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
     });
 
     // Send poll
-    const message = await session.client.sendMessage(formattedChatId, poll);
+    const message = await session.client.sendMessage(
+      formattedChatId,
+      poll,
+      {
+        // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
+        // in current whatsapp-web.js / WhatsApp Web versions.
+        // This does not affect WAAPI semantics (we only guarantee that the poll is sent).
+        sendSeen: false,
+      },
+    );
 
     res.json(createSuccessResponse({
       messageId: message.id?._serialized || message.id || null,
@@ -381,7 +390,16 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
     }
 
     // Send message
-    const sentMessage = await session.client.sendMessage(formattedChatId, message);
+    const sentMessage = await session.client.sendMessage(
+      formattedChatId,
+      message,
+      {
+        // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
+        // in current whatsapp-web.js / WhatsApp Web versions.
+        // This does not affect WAAPI semantics (we only guarantee that the message is sent).
+        sendSeen: false,
+      },
+    );
 
     res.json(createSuccessResponse({
       messageId: sentMessage.id?._serialized || sentMessage.id || null,
