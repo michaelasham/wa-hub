@@ -27,6 +27,8 @@ class SessionInfo {
     this.webhookEvents = [];
     this.createdAt = new Date();
     this.lastQrUpdate = null;
+    this.reconnecting = false; // Flag to prevent multiple simultaneous reconnection attempts
+    this.lastReconnectAttempt = null; // Timestamp of last reconnection attempt
   }
 }
 
@@ -196,12 +198,24 @@ function setupEventListeners(sessionId, client) {
   });
 
   // Disconnected event
-  client.on('disconnected', (reason) => {
+  client.on('disconnected', async (reason) => {
     console.log(`[${sessionId}] Disconnected:`, reason);
     session.status = 'disconnected';
     forwardWebhook(sessionId, 'disconnected', {
       reason: reason || 'unknown',
     });
+    
+    // Attempt automatic reconnection (with throttling to avoid loops)
+    // Only reconnect if we're not already reconnecting and it's been at least 10 seconds since last attempt
+    if (!session.reconnecting && 
+        (!session.lastReconnectAttempt || Date.now() - session.lastReconnectAttempt > 10000)) {
+      console.log(`[${sessionId}] Attempting automatic reconnection...`);
+      try {
+        await reconnectSession(sessionId);
+      } catch (error) {
+        console.error(`[${sessionId}] Automatic reconnection failed:`, error);
+      }
+    }
   });
 
   // State change event
@@ -338,6 +352,80 @@ function updateWebhookConfig(sessionId, webhookConfig) {
 }
 
 /**
+ * Reconnect a disconnected session by reinitializing the client
+ * @param {string} sessionId - Session ID
+ * @returns {Promise<void>}
+ */
+async function reconnectSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found`);
+  }
+
+  // Prevent multiple simultaneous reconnection attempts
+  if (session.reconnecting) {
+    console.log(`[${sessionId}] Reconnection already in progress, skipping...`);
+    return;
+  }
+
+  // Throttle reconnection attempts (max once every 10 seconds)
+  if (session.lastReconnectAttempt && Date.now() - session.lastReconnectAttempt < 10000) {
+    console.log(`[${sessionId}] Reconnection attempt throttled (too soon after last attempt)`);
+    return;
+  }
+
+  session.reconnecting = true;
+  session.lastReconnectAttempt = Date.now();
+
+  try {
+    console.log(`[${sessionId}] Reconnecting session...`);
+
+    // Clean up old client if it exists
+    if (session.client) {
+      try {
+        // Don't call logout/destroy on a disconnected client - just clear the reference
+        session.client = null;
+      } catch (error) {
+        console.error(`[${sessionId}] Error cleaning up old client:`, error);
+      }
+    }
+
+    // Create new client with same configuration
+    const client = new Client({
+      authStrategy: new LocalAuth({
+        clientId: sessionId,
+      }),
+      puppeteer: {
+        headless: true,
+        executablePath: config.chromePath,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+        ],
+      },
+    });
+
+    session.client = client;
+    session.status = 'initializing';
+
+    // Set up event listeners
+    setupEventListeners(sessionId, client);
+
+    // Reinitialize client (will use existing LocalAuth session if valid, or request new QR if not)
+    await client.initialize();
+
+    console.log(`[${sessionId}] Reconnection initiated successfully`);
+  } catch (error) {
+    console.error(`[${sessionId}] Reconnection failed:`, error);
+    session.status = 'disconnected';
+    throw error;
+  } finally {
+    session.reconnecting = false;
+  }
+}
+
+/**
  * Get client state
  * @param {string} sessionId - Session ID
  * @returns {Promise<string>} Client state
@@ -364,5 +452,6 @@ module.exports = {
   deleteSession,
   updateWebhookConfig,
   getClientState,
+  reconnectSession,
 };
 

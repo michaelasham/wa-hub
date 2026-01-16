@@ -366,10 +366,26 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
     if (errorMessage.includes('Session closed') || 
         errorMessage.includes('page has been closed') ||
         errorMessage.includes('Protocol error')) {
-      return res.status(400).json(createErrorResponse(
-        'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
-        400
-      ));
+      // Try to automatically reconnect
+      const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+      const session = sessionManager.getSession(instanceId);
+      if (session) {
+        session.status = 'disconnected';
+        console.log(`[${instanceId}] Session closed error detected in outer catch, attempting automatic reconnection...`);
+        try {
+          await sessionManager.reconnectSession(instanceId);
+          return res.status(400).json(createErrorResponse(
+            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
+            400
+          ));
+        } catch (reconnectError) {
+          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
+          return res.status(400).json(createErrorResponse(
+            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
+            400
+          ));
+        }
+      }
     }
     res.status(500).json(createErrorResponse(errorMessage, 500));
   }
@@ -435,12 +451,23 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       if (errorMessage.includes('Session closed') || 
           errorMessage.includes('page has been closed') ||
           errorMessage.includes('Protocol error')) {
-        // Update session status if we detect it's closed
+        // Try to automatically reconnect
         session.status = 'disconnected';
-        return res.status(400).json(createErrorResponse(
-          'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
-          400
-        ));
+        console.log(`[${instanceId}] Session closed error detected, attempting automatic reconnection...`);
+        try {
+          await sessionManager.reconnectSession(instanceId);
+          // Reconnection initiated - return error and let client retry
+          return res.status(400).json(createErrorResponse(
+            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
+            400
+          ));
+        } catch (reconnectError) {
+          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
+          return res.status(400).json(createErrorResponse(
+            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
+            400
+          ));
+        }
       }
       // Re-throw other errors
       throw sendError;
@@ -455,10 +482,26 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
     if (errorMessage.includes('Session closed') || 
         errorMessage.includes('page has been closed') ||
         errorMessage.includes('Protocol error')) {
-      return res.status(400).json(createErrorResponse(
-        'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
-        400
-      ));
+      // Try to automatically reconnect
+      const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+      const session = sessionManager.getSession(instanceId);
+      if (session) {
+        session.status = 'disconnected';
+        console.log(`[${instanceId}] Session closed error detected in outer catch, attempting automatic reconnection...`);
+        try {
+          await sessionManager.reconnectSession(instanceId);
+          return res.status(400).json(createErrorResponse(
+            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
+            400
+          ));
+        } catch (reconnectError) {
+          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
+          return res.status(400).json(createErrorResponse(
+            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
+            400
+          ));
+        }
+      }
     }
     res.status(500).json(createErrorResponse(errorMessage, 500));
   }
