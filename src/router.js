@@ -328,23 +328,50 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
     });
 
     // Send poll
-    const message = await session.client.sendMessage(
-      formattedChatId,
-      poll,
-      {
-        // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
-        // in current whatsapp-web.js / WhatsApp Web versions.
-        // This does not affect WAAPI semantics (we only guarantee that the poll is sent).
-        sendSeen: false,
-      },
-    );
+    let message;
+    try {
+      message = await session.client.sendMessage(
+        formattedChatId,
+        poll,
+        {
+          // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
+          // in current whatsapp-web.js / WhatsApp Web versions.
+          // This does not affect WAAPI semantics (we only guarantee that the poll is sent).
+          sendSeen: false,
+        },
+      );
+    } catch (sendError) {
+      // Check if it's a session closed error
+      const errorMessage = sendError.message || String(sendError);
+      if (errorMessage.includes('Session closed') || 
+          errorMessage.includes('page has been closed') ||
+          errorMessage.includes('Protocol error')) {
+        // Update session status if we detect it's closed
+        session.status = 'disconnected';
+        return res.status(400).json(createErrorResponse(
+          'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
+          400
+        ));
+      }
+      // Re-throw other errors
+      throw sendError;
+    }
 
     res.json(createSuccessResponse({
       messageId: message.id?._serialized || message.id || null,
     }));
   } catch (error) {
     console.error('Error sending poll:', error);
-    res.status(500).json(createErrorResponse(error.message, 500));
+    const errorMessage = error.message || String(error);
+    if (errorMessage.includes('Session closed') || 
+        errorMessage.includes('page has been closed') ||
+        errorMessage.includes('Protocol error')) {
+      return res.status(400).json(createErrorResponse(
+        'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
+        400
+      ));
+    }
+    res.status(500).json(createErrorResponse(errorMessage, 500));
   }
 });
 
@@ -390,23 +417,50 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
     }
 
     // Send message
-    const sentMessage = await session.client.sendMessage(
-      formattedChatId,
-      message,
-      {
-        // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
-        // in current whatsapp-web.js / WhatsApp Web versions.
-        // This does not affect WAAPI semantics (we only guarantee that the message is sent).
-        sendSeen: false,
-      },
-    );
+    let sentMessage;
+    try {
+      sentMessage = await session.client.sendMessage(
+        formattedChatId,
+        message,
+        {
+          // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
+          // in current whatsapp-web.js / WhatsApp Web versions.
+          // This does not affect WAAPI semantics (we only guarantee that the message is sent).
+          sendSeen: false,
+        },
+      );
+    } catch (sendError) {
+      // Check if it's a session closed error
+      const errorMessage = sendError.message || String(sendError);
+      if (errorMessage.includes('Session closed') || 
+          errorMessage.includes('page has been closed') ||
+          errorMessage.includes('Protocol error')) {
+        // Update session status if we detect it's closed
+        session.status = 'disconnected';
+        return res.status(400).json(createErrorResponse(
+          'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
+          400
+        ));
+      }
+      // Re-throw other errors
+      throw sendError;
+    }
 
     res.json(createSuccessResponse({
       messageId: sentMessage.id?._serialized || sentMessage.id || null,
     }));
   } catch (error) {
     console.error('Error sending message:', error);
-    res.status(500).json(createErrorResponse(error.message, 500));
+    const errorMessage = error.message || String(error);
+    if (errorMessage.includes('Session closed') || 
+        errorMessage.includes('page has been closed') ||
+        errorMessage.includes('Protocol error')) {
+      return res.status(400).json(createErrorResponse(
+        'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
+        400
+      ));
+    }
+    res.status(500).json(createErrorResponse(errorMessage, 500));
   }
 });
 
