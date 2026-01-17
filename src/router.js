@@ -294,8 +294,30 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready
-    if (session.status !== 'ready' && session.status !== 'authenticated') {
+    // Check if client is ready - if disconnected, attempt reconnection first
+    if (session.status === 'disconnected') {
+      console.log(`[${instanceId}] Instance is disconnected, attempting automatic reconnection before sending poll...`);
+      try {
+        await sessionManager.reconnectSession(instanceId);
+        // Wait a moment for reconnection to start
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Refresh session status
+        const updatedSession = sessionManager.getSession(instanceId);
+        if (updatedSession && updatedSession.status !== 'ready' && updatedSession.status !== 'authenticated') {
+          return res.status(400).json(createErrorResponse(
+            `Instance is disconnected. Automatic reconnection has been initiated. Current status: ${updatedSession.status}. Please retry in a few seconds.`,
+            400
+          ));
+        }
+        // If reconnected, continue with the request below
+      } catch (reconnectError) {
+        console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
+        return res.status(400).json(createErrorResponse(
+          `Instance is disconnected and automatic reconnection failed. Please check the instance status and reconnect manually if needed.`,
+          400
+        ));
+      }
+    } else if (session.status !== 'ready' && session.status !== 'authenticated') {
       return res.status(400).json(createErrorResponse(
         `Instance is not connected. Current status: ${session.status}`,
         400
@@ -408,8 +430,30 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready
-    if (session.status !== 'ready' && session.status !== 'authenticated') {
+    // Check if client is ready - if disconnected, attempt reconnection first
+    if (session.status === 'disconnected') {
+      console.log(`[${instanceId}] Instance is disconnected, attempting automatic reconnection before sending message...`);
+      try {
+        await sessionManager.reconnectSession(instanceId);
+        // Wait a moment for reconnection to start
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Refresh session status
+        const updatedSession = sessionManager.getSession(instanceId);
+        if (updatedSession && updatedSession.status !== 'ready' && updatedSession.status !== 'authenticated') {
+          return res.status(400).json(createErrorResponse(
+            `Instance is disconnected. Automatic reconnection has been initiated. Current status: ${updatedSession.status}. Please retry in a few seconds.`,
+            400
+          ));
+        }
+        // If reconnected, continue with the request below
+      } catch (reconnectError) {
+        console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
+        return res.status(400).json(createErrorResponse(
+          `Instance is disconnected and automatic reconnection failed. Please check the instance status and reconnect manually if needed.`,
+          400
+        ));
+      }
+    } else if (session.status !== 'ready' && session.status !== 'authenticated') {
       return res.status(400).json(createErrorResponse(
         `Instance is not connected. Current status: ${session.status}`,
         400
