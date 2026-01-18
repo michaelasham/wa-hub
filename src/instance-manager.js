@@ -220,7 +220,33 @@ async function createClient(instanceId, instanceName) {
     puppeteer: {
       headless: true,
       executablePath: config.chromePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-default-apps',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--disable-notifications',
+        '--disable-prompt-on-repost',
+        '--disable-renderer-backgrounding',
+        '--disable-sync',
+        '--enable-features=NetworkService,NetworkServiceInProcess',
+        '--force-color-profile=srgb',
+        '--hide-scrollbars',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-first-run',
+        '--disable-blink-features=AutomationControlled',
+      ],
     },
   });
 }
@@ -585,9 +611,13 @@ async function flushQueue(instanceId) {
     } catch (error) {
       console.error(`[${instanceId}] Error processing queued item ${item.id}:`, error.message);
       
-      // If disconnect error, stop flushing and trigger reconnection
+      // If disconnect/null client error, stop flushing and trigger reconnection
       const errorMsg = error.message || String(error);
-      if (errorMsg.includes('Session closed') || errorMsg.includes('disconnected')) {
+      if (errorMsg.includes('Session closed') || 
+          errorMsg.includes('disconnected') ||
+          errorMsg.includes('null') ||
+          errorMsg.includes('evaluate') ||
+          errorMsg.includes('Failed to launch')) {
         instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during queue flush');
         // Re-queue failed item
         instance.queue.unshift(item);
@@ -597,6 +627,7 @@ async function flushQueue(instanceId) {
         });
         break;
       }
+      // For other errors, continue with next item (don't block queue)
     }
   }
   
@@ -684,15 +715,27 @@ async function sendMessage(instanceId, chatId, message) {
     throw new Error(`Instance ${instanceId} not found`);
   }
   
-  // If ready, send immediately
+  // If ready, send immediately (with error handling)
   if (instance.state === InstanceState.READY && instance.client) {
-    const sentMessage = await instance.client.sendMessage(chatId, message, { sendSeen: false });
-    return {
-      status: 'sent',
-      instanceState: instance.state,
-      queueDepth: instance.queue.length,
-      messageId: sentMessage.id?._serialized || sentMessage.id || null,
-    };
+    try {
+      const sentMessage = await instance.client.sendMessage(chatId, message, { sendSeen: false });
+      return {
+        status: 'sent',
+        instanceState: instance.state,
+        queueDepth: instance.queue.length,
+        messageId: sentMessage.id?._serialized || sentMessage.id || null,
+      };
+    } catch (sendError) {
+      // If send fails due to client being null/unavailable, queue instead
+      const errorMsg = sendError.message || String(sendError);
+      if (errorMsg.includes('null') || errorMsg.includes('evaluate') || errorMsg.includes('Session closed')) {
+        console.warn(`[${instanceId}] Send failed (client unavailable), queuing instead:`, errorMsg);
+        instance.transitionTo(InstanceState.DISCONNECTED, 'Send failed - client unavailable');
+        // Fall through to queue logic below
+      } else {
+        throw sendError;
+      }
+    }
   }
   
   // Otherwise, queue and trigger ensureReady
@@ -722,19 +765,31 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers) {
     throw new Error(`Instance ${instanceId} not found`);
   }
   
-  // If ready, send immediately
+  // If ready, send immediately (with error handling)
   if (instance.state === InstanceState.READY && instance.client) {
-    const { Poll } = require('whatsapp-web.js');
-    const poll = new Poll(caption, options, {
-      allowMultipleAnswers: multipleAnswers === true,
-    });
-    const sentMessage = await instance.client.sendMessage(chatId, poll, { sendSeen: false });
-    return {
-      status: 'sent',
-      instanceState: instance.state,
-      queueDepth: instance.queue.length,
-      messageId: sentMessage.id?._serialized || sentMessage.id || null,
-    };
+    try {
+      const { Poll } = require('whatsapp-web.js');
+      const poll = new Poll(caption, options, {
+        allowMultipleAnswers: multipleAnswers === true,
+      });
+      const sentMessage = await instance.client.sendMessage(chatId, poll, { sendSeen: false });
+      return {
+        status: 'sent',
+        instanceState: instance.state,
+        queueDepth: instance.queue.length,
+        messageId: sentMessage.id?._serialized || sentMessage.id || null,
+      };
+    } catch (sendError) {
+      // If send fails due to client being null/unavailable, queue instead
+      const errorMsg = sendError.message || String(sendError);
+      if (errorMsg.includes('null') || errorMsg.includes('evaluate') || errorMsg.includes('Session closed')) {
+        console.warn(`[${instanceId}] Send poll failed (client unavailable), queuing instead:`, errorMsg);
+        instance.transitionTo(InstanceState.DISCONNECTED, 'Send failed - client unavailable');
+        // Fall through to queue logic below
+      } else {
+        throw sendError;
+      }
+    }
   }
   
   // Otherwise, queue and trigger ensureReady
