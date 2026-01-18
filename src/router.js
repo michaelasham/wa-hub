@@ -329,29 +329,19 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready - if disconnected, attempt reconnection first
+    // Check if client is ready - if disconnected, start reconnection in background and return immediately
     if (session.status === 'disconnected') {
-      console.log(`[${instanceId}] Instance is disconnected, attempting automatic reconnection before sending poll...`);
-      try {
-        await sessionManager.reconnectSession(instanceId);
-        // Wait a moment for reconnection to start
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        // Refresh session status
-        const updatedSession = sessionManager.getSession(instanceId);
-        if (updatedSession && updatedSession.status !== 'ready' && updatedSession.status !== 'authenticated') {
-          return res.status(400).json(createErrorResponse(
-            `Instance is disconnected. Automatic reconnection has been initiated. Current status: ${updatedSession.status}. Please retry in a few seconds.`,
-            400
-          ));
-        }
-        // If reconnected, continue with the request below
-      } catch (reconnectError) {
-        console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
-        return res.status(400).json(createErrorResponse(
-          `Instance is disconnected and automatic reconnection failed. Please check the instance status and reconnect manually if needed.`,
-          400
-        ));
-      }
+      console.log(`[${instanceId}] Instance is disconnected, starting automatic reconnection in background...`);
+      // Start reconnection in background (fire-and-forget, don't block)
+      sessionManager.reconnectSession(instanceId).catch((error) => {
+        console.error(`[${instanceId}] Background reconnection failed:`, error);
+      });
+      
+      // Return immediately with clear message to retry
+      return res.status(400).json(createErrorResponse(
+        'Instance is disconnected. Automatic reconnection has been initiated. Please retry in a few seconds.',
+        400
+      ));
     } else if (session.status !== 'ready' && session.status !== 'authenticated') {
       return res.status(400).json(createErrorResponse(
         `Instance is not connected. Current status: ${session.status}`,
@@ -423,25 +413,20 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
     if (errorMessage.includes('Session closed') || 
         errorMessage.includes('page has been closed') ||
         errorMessage.includes('Protocol error')) {
-      // Try to automatically reconnect
+      // Start reconnection in background (fire-and-forget)
       const instanceId = sanitizeInstanceId(getInstanceId(req.params));
       const session = sessionManager.getSession(instanceId);
       if (session) {
         session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected in outer catch, attempting automatic reconnection...`);
-        try {
-          await sessionManager.reconnectSession(instanceId);
-          return res.status(400).json(createErrorResponse(
-            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
-            400
-          ));
-        } catch (reconnectError) {
-          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
-          return res.status(400).json(createErrorResponse(
-            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
-            400
-          ));
-        }
+        console.log(`[${instanceId}] Session closed error detected in outer catch, starting automatic reconnection in background...`);
+        sessionManager.reconnectSession(instanceId).catch((error) => {
+          console.error(`[${instanceId}] Background reconnection failed:`, error);
+        });
+        
+        return res.status(400).json(createErrorResponse(
+          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
+          400
+        ));
       }
     }
     res.status(500).json(createErrorResponse(errorMessage, 500));
@@ -465,29 +450,19 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready - if disconnected, attempt reconnection first
+    // Check if client is ready - if disconnected, start reconnection in background and return immediately
     if (session.status === 'disconnected') {
-      console.log(`[${instanceId}] Instance is disconnected, attempting automatic reconnection before sending message...`);
-      try {
-        await sessionManager.reconnectSession(instanceId);
-        // Wait a moment for reconnection to start
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        // Refresh session status
-        const updatedSession = sessionManager.getSession(instanceId);
-        if (updatedSession && updatedSession.status !== 'ready' && updatedSession.status !== 'authenticated') {
-          return res.status(400).json(createErrorResponse(
-            `Instance is disconnected. Automatic reconnection has been initiated. Current status: ${updatedSession.status}. Please retry in a few seconds.`,
-            400
-          ));
-        }
-        // If reconnected, continue with the request below
-      } catch (reconnectError) {
-        console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
-        return res.status(400).json(createErrorResponse(
-          `Instance is disconnected and automatic reconnection failed. Please check the instance status and reconnect manually if needed.`,
-          400
-        ));
-      }
+      console.log(`[${instanceId}] Instance is disconnected, starting automatic reconnection in background...`);
+      // Start reconnection in background (fire-and-forget, don't block)
+      sessionManager.reconnectSession(instanceId).catch((error) => {
+        console.error(`[${instanceId}] Background reconnection failed:`, error);
+      });
+      
+      // Return immediately with clear message to retry
+      return res.status(400).json(createErrorResponse(
+        'Instance is disconnected. Automatic reconnection has been initiated. Please retry in a few seconds.',
+        400
+      ));
     } else if (session.status !== 'ready' && session.status !== 'authenticated') {
       return res.status(400).json(createErrorResponse(
         `Instance is not connected. Current status: ${session.status}`,
@@ -530,23 +505,18 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       if (errorMessage.includes('Session closed') || 
           errorMessage.includes('page has been closed') ||
           errorMessage.includes('Protocol error')) {
-        // Try to automatically reconnect
+        // Update status and start reconnection in background (fire-and-forget)
         session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected, attempting automatic reconnection...`);
-        try {
-          await sessionManager.reconnectSession(instanceId);
-          // Reconnection initiated - return error and let client retry
-          return res.status(400).json(createErrorResponse(
-            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
-            400
-          ));
-        } catch (reconnectError) {
-          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
-          return res.status(400).json(createErrorResponse(
-            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
-            400
-          ));
-        }
+        console.log(`[${instanceId}] Session closed error detected, starting automatic reconnection in background...`);
+        sessionManager.reconnectSession(instanceId).catch((error) => {
+          console.error(`[${instanceId}] Background reconnection failed:`, error);
+        });
+        
+        // Return immediately with clear message to retry
+        return res.status(400).json(createErrorResponse(
+          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
+          400
+        ));
       }
       // Re-throw other errors
       throw sendError;
@@ -561,25 +531,20 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
     if (errorMessage.includes('Session closed') || 
         errorMessage.includes('page has been closed') ||
         errorMessage.includes('Protocol error')) {
-      // Try to automatically reconnect
+      // Start reconnection in background (fire-and-forget)
       const instanceId = sanitizeInstanceId(getInstanceId(req.params));
       const session = sessionManager.getSession(instanceId);
       if (session) {
         session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected in outer catch, attempting automatic reconnection...`);
-        try {
-          await sessionManager.reconnectSession(instanceId);
-          return res.status(400).json(createErrorResponse(
-            'Client session was closed. Automatic reconnection has been initiated. Please retry the request in a few seconds.',
-            400
-          ));
-        } catch (reconnectError) {
-          console.error(`[${instanceId}] Automatic reconnection failed:`, reconnectError);
-          return res.status(400).json(createErrorResponse(
-            'Client session is closed and automatic reconnection failed. Please check the instance status and reconnect manually if needed.',
-            400
-          ));
-        }
+        console.log(`[${instanceId}] Session closed error detected in outer catch, starting automatic reconnection in background...`);
+        sessionManager.reconnectSession(instanceId).catch((error) => {
+          console.error(`[${instanceId}] Background reconnection failed:`, error);
+        });
+        
+        return res.status(400).json(createErrorResponse(
+          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
+          400
+        ));
       }
     }
     res.status(500).json(createErrorResponse(errorMessage, 500));
