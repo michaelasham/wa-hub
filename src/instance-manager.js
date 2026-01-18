@@ -7,7 +7,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
-const { nanoid } = require('nanoid');
+const crypto = require('crypto');
 const config = require('./config');
 const { qrToBase64, extractPhoneNumber, sanitizeInstanceId } = require('./utils');
 
@@ -693,7 +693,7 @@ function enqueueItem(instanceId, type, payload) {
   }
   
   const item = {
-    id: nanoid(),
+    id: crypto.randomBytes(16).toString('hex'), // Generate random ID
     type,
     payload,
     createdAt: new Date(),
