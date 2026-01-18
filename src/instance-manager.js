@@ -200,6 +200,81 @@ async function forwardWebhook(instanceId, event, data) {
 }
 
 /**
+ * Migrate old session data from shared directory to per-instance directory (backward compatibility)
+ */
+async function migrateOldSessionData(instanceId, newAuthPath) {
+  const oldAuthBase = config.sessionDataPath || './.wwebjs_auth';
+  const sanitizedId = sanitizeInstanceId(instanceId);
+  
+  // LocalAuth creates folders like "session-{clientId}" or just "{clientId}"
+  const possibleOldPaths = [
+    path.join(oldAuthBase, `session-${sanitizedId}`),
+    path.join(oldAuthBase, sanitizedId),
+    path.join(oldAuthBase, `Default-${sanitizedId}`),
+  ];
+  
+  const newSessionPath = path.join(newAuthPath, `session-${sanitizedId}`);
+  
+  for (const oldPath of possibleOldPaths) {
+    try {
+      const stat = await fs.stat(oldPath);
+      if (stat.isDirectory()) {
+        // Check if new path already has data
+        try {
+          await fs.access(newSessionPath);
+          console.log(`[${instanceId}] New session path already exists, skipping migration`);
+          return; // Already migrated or exists
+        } catch {
+          // New path doesn't exist, proceed with migration
+        }
+        
+        // Copy old session data to new location
+        console.log(`[${instanceId}] Migrating session data from ${oldPath} to ${newSessionPath}`);
+        await fs.mkdir(newSessionPath, { recursive: true });
+        
+        // Copy all files/directories from old to new
+        const entries = await fs.readdir(oldPath, { withFileTypes: true });
+        for (const entry of entries) {
+          const srcPath = path.join(oldPath, entry.name);
+          const destPath = path.join(newSessionPath, entry.name);
+          
+          if (entry.isDirectory()) {
+            await copyDirectory(srcPath, destPath);
+          } else {
+            await fs.copyFile(srcPath, destPath);
+          }
+        }
+        
+        console.log(`[${instanceId}] Session data migration completed`);
+        return; // Successfully migrated
+      }
+    } catch (error) {
+      // Old path doesn't exist, try next one
+      continue;
+    }
+  }
+}
+
+/**
+ * Helper to recursively copy directory
+ */
+async function copyDirectory(src, dest) {
+  await fs.mkdir(dest, { recursive: true });
+  const entries = await fs.readdir(src, { withFileTypes: true });
+  
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    
+    if (entry.isDirectory()) {
+      await copyDirectory(srcPath, destPath);
+    } else {
+      await fs.copyFile(srcPath, destPath);
+    }
+  }
+}
+
+/**
  * Create WhatsApp client with isolated LocalAuth
  */
 async function createClient(instanceId, instanceName) {
@@ -211,6 +286,11 @@ async function createClient(instanceId, instanceName) {
   } catch (error) {
     console.warn(`[${instanceId}] Could not create auth directory:`, error.message);
   }
+  
+  // Migrate old session data if it exists (backward compatibility)
+  await migrateOldSessionData(instanceId, authDataPath).catch(err => {
+    console.warn(`[${instanceId}] Session migration failed (non-critical):`, err.message);
+  });
   
   return new Client({
     authStrategy: new LocalAuth({
