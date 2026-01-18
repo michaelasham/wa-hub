@@ -10,6 +10,8 @@ const path = require('path');
 const crypto = require('crypto');
 const config = require('./config');
 const { qrToBase64, extractPhoneNumber, sanitizeInstanceId } = require('./utils');
+const idempotencyStore = require('./idempotency-store');
+const { withTypingIndicator } = require('./utils/typingIndicator');
 
 // State machine enum
 const InstanceState = {
@@ -69,6 +71,29 @@ class InstanceContext {
     
     // Restart tracking for rate limiting
     this.restartHistory = []; // Array of timestamps
+    
+    // Send loop state
+    this.sendLoopRunning = false;
+    this.sendLoopInterval = null;
+    
+    // Counters for observability
+    this.counters = {
+      sent24h: [], // Array of timestamps (last 24 hours)
+      sent1h: [], // Array of timestamps (last hour)
+      newChats24h: [], // Array of timestamps
+      failures1h: [], // Array of timestamps
+      disconnects1h: [], // Array of timestamps
+    };
+    
+    // Rate limiting tracking
+    this.sendHistory1min = []; // Timestamps of sends in last minute
+    this.sendHistory1hour = []; // Timestamps of sends in last hour
+    
+    // Typing indicator configuration
+    this.typingIndicatorEnabled = webhookConfig.typingIndicatorEnabled !== undefined 
+      ? webhookConfig.typingIndicatorEnabled 
+      : config.typingIndicatorEnabledDefault;
+    this.applyTypingTo = webhookConfig.applyTypingTo || ['customer']; // ['customer'] or ['customer', 'merchant']
   }
   
   /**
@@ -96,8 +121,12 @@ class InstanceContext {
           this.readyTimeout = null;
         }
       }
+      // Start send loop when ready
+      startSendLoop(this.id);
     } else if (newState === InstanceState.DISCONNECTED) {
       this.lastDisconnectAt = new Date();
+      // Stop send loop
+      stopSendLoop(this.id);
       // Reject ready promise if waiting
       if (this.readyRejector) {
         this.readyRejector(new Error('Instance disconnected'));
@@ -108,6 +137,9 @@ class InstanceContext {
           this.readyTimeout = null;
         }
       }
+    } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR) {
+      // Stop send loop on terminal states
+      stopSendLoop(this.id);
     }
   }
   
@@ -165,6 +197,84 @@ class InstanceContext {
   getAuthDataPath() {
     const sanitizedId = sanitizeInstanceId(this.id);
     return path.join(config.authBaseDir, sanitizedId);
+  }
+  
+  /**
+   * Record a successful send (for rate limiting and counters)
+   */
+  recordSend() {
+    const now = Date.now();
+    this.sendHistory1min.push(now);
+    this.sendHistory1hour.push(now);
+    this.counters.sent24h.push(now);
+    this.counters.sent1h.push(now);
+    
+    // Clean old entries
+    const oneMinAgo = now - 60000;
+    const oneHourAgo = now - 3600000;
+    const oneDayAgo = now - 86400000;
+    
+    this.sendHistory1min = this.sendHistory1min.filter(ts => ts > oneMinAgo);
+    this.sendHistory1hour = this.sendHistory1hour.filter(ts => ts > oneHourAgo);
+    this.counters.sent1h = this.counters.sent1h.filter(ts => ts > oneHourAgo);
+    this.counters.sent24h = this.counters.sent24h.filter(ts => ts > oneDayAgo);
+  }
+  
+  /**
+   * Record a failure
+   */
+  recordFailure() {
+    const now = Date.now();
+    this.counters.failures1h.push(now);
+    
+    // Clean old entries
+    const oneHourAgo = now - 3600000;
+    this.counters.failures1h = this.counters.failures1h.filter(ts => ts > oneHourAgo);
+  }
+  
+  /**
+   * Record a disconnect
+   */
+  recordDisconnect() {
+    const now = Date.now();
+    this.counters.disconnects1h.push(now);
+    
+    // Clean old entries
+    const oneHourAgo = now - 3600000;
+    this.counters.disconnects1h = this.counters.disconnects1h.filter(ts => ts > oneHourAgo);
+  }
+  
+  /**
+   * Check if rate limit exceeded (per minute)
+   */
+  isRateLimitedPerMinute() {
+    return this.sendHistory1min.length >= config.maxSendsPerMinute;
+  }
+  
+  /**
+   * Check if rate limit exceeded (per hour)
+   */
+  isRateLimitedPerHour() {
+    return this.sendHistory1hour.length >= config.maxSendsPerHour;
+  }
+  
+  /**
+   * Get next allowed send time (for rate limiting)
+   */
+  getNextAllowedSendTime() {
+    if (this.sendHistory1min.length >= config.maxSendsPerMinute) {
+      // Next send allowed when oldest entry in 1min window expires
+      const oldest = Math.min(...this.sendHistory1min);
+      return oldest + 60000; // 1 minute from oldest entry
+    }
+    
+    if (this.sendHistory1hour.length >= config.maxSendsPerHour) {
+      // Next send allowed when oldest entry in 1hour window expires
+      const oldest = Math.min(...this.sendHistory1hour);
+      return oldest + 3600000; // 1 hour from oldest entry
+    }
+    
+    return null; // No rate limit
   }
 }
 
@@ -381,10 +491,8 @@ function setupEventListeners(instanceId, client) {
     instance.transitionTo(InstanceState.READY);
     await forwardWebhook(instanceId, 'ready', { status: 'ready' });
     
-    // Flush queue on ready
-    flushQueue(instanceId).catch(err => {
-      console.error(`[${instanceId}] Error flushing queue:`, err);
-    });
+    // Start send loop on ready (steady drain)
+    startSendLoop(instanceId);
   });
   
   // Auth failure
@@ -401,6 +509,10 @@ function setupEventListeners(instanceId, client) {
     instance.lastDisconnectAt = new Date();
     instance.lastDisconnectReason = reason || 'unknown';
     instance.lastEvent = 'disconnected';
+    instance.recordDisconnect();
+    
+    // Stop send loop
+    stopSendLoop(instanceId);
     
     // Check if terminal disconnect reason
     const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
@@ -660,59 +772,250 @@ async function ensureReady(instanceId) {
 }
 
 /**
- * Flush message/poll queue sequentially
+ * Process a single queue item (with idempotency, rate limiting, error handling)
  */
-async function flushQueue(instanceId) {
+async function processQueueItem(instanceId, item) {
   const instance = instances.get(instanceId);
-  if (!instance || instance.state !== InstanceState.READY) {
-    return;
+  if (!instance || !instance.client) {
+    return false; // Cannot process
   }
   
-  if (instance.queue.length === 0) {
-    return;
+  // Check if item is ready to process (nextAttemptAt)
+  const now = Date.now();
+  if (item.nextAttemptAt && now < item.nextAttemptAt) {
+    return false; // Not ready yet
   }
   
-  console.log(`[${instanceId}] Flushing queue (${instance.queue.length} items)...`);
+  // Check idempotency - skip if already sent
+  const isSent = await idempotencyStore.isSent(item.idempotencyKey);
+  if (isSent) {
+    console.log(`[${instanceId}] Skipping item ${item.id} - already sent (idempotency: ${item.idempotencyKey.substring(0, 20)}...)`);
+    return true; // Remove from queue (already sent)
+  }
   
-  while (instance.queue.length > 0 && instance.state === InstanceState.READY) {
-    const item = instance.queue.shift();
+  // Check rate limits
+  if (instance.isRateLimitedPerMinute() || instance.isRateLimitedPerHour()) {
+    const nextAllowed = instance.getNextAllowedSendTime();
+    if (nextAllowed) {
+      item.nextAttemptAt = nextAllowed;
+      console.log(`[${instanceId}] Rate limited - deferring item ${item.id} until ${new Date(nextAllowed).toISOString()}`);
+      return false; // Keep in queue, but defer
+    }
+  }
+  
+  // Ensure instance is ready
+  if (instance.state !== InstanceState.READY) {
+    // Trigger ensureReady if not terminal
+    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+      ensureReady(instanceId).catch(err => {
+        console.error(`[${instanceId}] ensureReady failed:`, err);
+      });
+    }
+    return false; // Cannot process now
+  }
+  
+  // Send the message/poll with optional typing indicator
+  try {
+    let sentMessage;
     
-    try {
+    // Determine if typing should be applied
+    const shouldApplyTyping = instance.state === InstanceState.READY &&
+                              instance.typingIndicatorEnabled &&
+                              item.uxTyping !== false; // Default true, but can be disabled per message
+    
+    // Wrap send with typing indicator if enabled
+    const sendFn = async () => {
       if (item.type === 'message') {
-        await instance.client.sendMessage(item.payload.chatId, item.payload.message, { sendSeen: false });
+        return await instance.client.sendMessage(item.payload.chatId, item.payload.message, { sendSeen: false });
       } else if (item.type === 'poll') {
         const { Poll } = require('whatsapp-web.js');
         const poll = new Poll(item.payload.caption, item.payload.options, {
           allowMultipleAnswers: item.payload.multipleAnswers === true,
         });
-        await instance.client.sendMessage(item.payload.chatId, poll, { sendSeen: false });
+        return await instance.client.sendMessage(item.payload.chatId, poll, { sendSeen: false });
       }
+    };
+    
+    if (shouldApplyTyping) {
+      sentMessage = await withTypingIndicator(
+        instance.client,
+        item.payload.chatId,
+        sendFn,
+        {
+          enabled: true,
+          timeoutMs: config.typingIndicatorMaxTotalMs,
+          instanceName: instance.name,
+        }
+      );
+    } else {
+      // Send without typing indicator
+      sentMessage = await sendFn();
+    }
+    
+    // Success: mark as sent
+    const messageId = sentMessage?.id?._serialized || sentMessage?.id || null;
+    await idempotencyStore.markSent(item.idempotencyKey, messageId);
+    instance.recordSend();
+    
+    console.log(`[${instanceId}] ✓ Sent ${item.type} (idempotency: ${item.idempotencyKey.substring(0, 20)}..., messageId: ${messageId})`);
+    return true; // Remove from queue
+    
+  } catch (error) {
+    item.attemptCount++;
+    const errorMsg = error.message || String(error);
+    item.lastError = errorMsg;
+    instance.recordFailure();
+    
+    // Classify error
+    const isDisconnectError = errorMsg.includes('Session closed') || 
+                              errorMsg.includes('disconnected') ||
+                              errorMsg.includes('null') ||
+                              errorMsg.includes('evaluate') ||
+                              errorMsg.includes('Failed to launch');
+    
+    if (isDisconnectError) {
+      // Terminal disconnect - stop sending, trigger reconnection
+      console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
+      instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during send');
       
-      console.log(`[${instanceId}] Queued item processed: ${item.id}`);
-    } catch (error) {
-      console.error(`[${instanceId}] Error processing queued item ${item.id}:`, error.message);
+      // Calculate backoff
+      const backoffMs = Math.min(
+        config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
+        config.retryMaxBackoffMs
+      );
+      item.nextAttemptAt = now + backoffMs;
       
-      // If disconnect/null client error, stop flushing and trigger reconnection
-      const errorMsg = error.message || String(error);
-      if (errorMsg.includes('Session closed') || 
-          errorMsg.includes('disconnected') ||
-          errorMsg.includes('null') ||
-          errorMsg.includes('evaluate') ||
-          errorMsg.includes('Failed to launch')) {
-        instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during queue flush');
-        // Re-queue failed item
-        instance.queue.unshift(item);
-        // Trigger reconnection
+      // Trigger reconnection
+      if (instance.state !== InstanceState.NEEDS_QR) {
         ensureReady(instanceId).catch(err => {
-          console.error(`[${instanceId}] Reconnection after queue error failed:`, err);
+          console.error(`[${instanceId}] Reconnection failed:`, err);
         });
-        break;
       }
-      // For other errors, continue with next item (don't block queue)
+      
+      return false; // Keep in queue, will retry after reconnect
+    }
+    
+    // Other errors: retry with backoff
+    const backoffMs = Math.min(
+      config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
+      config.retryMaxBackoffMs
+    );
+    item.nextAttemptAt = now + backoffMs;
+    
+    console.error(`[${instanceId}] ✗ Send failed (attempt ${item.attemptCount}): ${errorMsg}. Retry at ${new Date(item.nextAttemptAt).toISOString()}`);
+    
+    // Mark as failed in idempotency store (but keep in queue for retry)
+    if (item.attemptCount >= 5) { // After 5 attempts, mark as failed
+      await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
+    }
+    
+    return false; // Keep in queue for retry
+  }
+}
+
+/**
+ * Continuous send loop (steady drain scheduler)
+ * Runs continuously when instance is READY, processing queue items with rate limiting
+ */
+async function runSendLoop(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    return; // Instance deleted
+  }
+  
+  // Only run if READY and queue has items
+  if (instance.state !== InstanceState.READY || instance.queue.length === 0) {
+    instance.sendLoopRunning = false;
+    return;
+  }
+  
+  // Process items in queue (but respect rate limits and nextAttemptAt)
+  const itemsToProcess = instance.queue.filter(item => {
+    const now = Date.now();
+    return !item.nextAttemptAt || now >= item.nextAttemptAt;
+  });
+  
+  if (itemsToProcess.length === 0) {
+    // All items are deferred - wait a bit before checking again
+    instance.sendLoopRunning = false;
+    setTimeout(() => {
+      startSendLoop(instanceId);
+    }, 1000); // Check again in 1 second
+    return;
+  }
+  
+  // Process first eligible item
+  const item = itemsToProcess[0];
+  const shouldRemove = await processQueueItem(instanceId, item);
+  
+  if (shouldRemove) {
+    // Remove from queue
+    const index = instance.queue.findIndex(q => q.id === item.id);
+    if (index !== -1) {
+      instance.queue.splice(index, 1);
     }
   }
   
-  console.log(`[${instanceId}] Queue flush completed. Remaining: ${instance.queue.length}`);
+  // Continue loop (recursive call after small delay for steady flow)
+  // This ensures we don't send too fast even if rate limits allow
+  setTimeout(() => {
+    runSendLoop(instanceId);
+  }, 500); // 500ms between sends for steady flow
+}
+
+/**
+ * Start the send loop if not already running
+ */
+function startSendLoop(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    return;
+  }
+  
+  // Only start if READY and not already running
+  if (instance.state !== InstanceState.READY) {
+    instance.sendLoopRunning = false;
+    return;
+  }
+  
+  if (instance.sendLoopRunning) {
+    return; // Already running
+  }
+  
+  if (instance.queue.length === 0) {
+    instance.sendLoopRunning = false;
+    return; // Nothing to process
+  }
+  
+  instance.sendLoopRunning = true;
+  runSendLoop(instanceId).catch(err => {
+    console.error(`[${instanceId}] Send loop error:`, err);
+    instance.sendLoopRunning = false;
+  });
+}
+
+/**
+ * Stop the send loop
+ */
+function stopSendLoop(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    return;
+  }
+  
+  instance.sendLoopRunning = false;
+  if (instance.sendLoopInterval) {
+    clearInterval(instance.sendLoopInterval);
+    instance.sendLoopInterval = null;
+  }
+}
+
+/**
+ * Legacy flushQueue - now just starts the send loop
+ * Kept for backward compatibility
+ */
+async function flushQueue(instanceId) {
+  startSendLoop(instanceId);
 }
 
 /**
@@ -761,9 +1064,25 @@ async function createInstance(instanceId, name, webhookConfig) {
 }
 
 /**
+ * Generate idempotency key for order confirmation poll
+ */
+function generateIdempotencyKey(type, instanceName, params) {
+  if (type === 'poll' && params.orderId && params.shop) {
+    return `order:${params.shop}:${params.orderId}:confirmPoll:v1`;
+  }
+  if (type === 'message' && params.orderId && params.shop && params.action) {
+    return `order:${params.shop}:${params.orderId}:${params.action}:v1`;
+  }
+  // Fallback: generate from payload hash
+  const payloadStr = JSON.stringify({ type, ...params });
+  const hash = crypto.createHash('sha256').update(payloadStr).digest('hex').substring(0, 16);
+  return `${type}:${instanceName}:${hash}:v1`;
+}
+
+/**
  * Enqueue message or poll
  */
-function enqueueItem(instanceId, type, payload) {
+async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
   const instance = instances.get(instanceId);
   if (!instance) {
     throw new Error(`Instance ${instanceId} not found`);
@@ -773,54 +1092,84 @@ function enqueueItem(instanceId, type, payload) {
     throw new Error(`Queue full (${config.maxQueueSize} items). Instance: ${instanceId}`);
   }
   
+  // Generate idempotency key if not provided
+  if (!idempotencyKey) {
+    idempotencyKey = generateIdempotencyKey(type, instance.name, payload);
+  }
+  
+  // Check idempotency before queuing
+  const isSent = await idempotencyStore.isSent(idempotencyKey);
+  if (isSent) {
+    throw new Error(`Message already sent (idempotency key: ${idempotencyKey})`);
+  }
+  
+  const isQueued = await idempotencyStore.isQueued(idempotencyKey);
+  if (isQueued) {
+    throw new Error(`Message already queued (idempotency key: ${idempotencyKey})`);
+  }
+  
+  const itemId = crypto.randomBytes(16).toString('hex');
   const item = {
-    id: crypto.randomBytes(16).toString('hex'), // Generate random ID
+    id: itemId,
     type,
     payload,
+    idempotencyKey,
     createdAt: new Date(),
     attemptCount: 0,
+    nextAttemptAt: Date.now(), // Can send immediately
+    lastError: null,
+    uxTyping: payload.uxTyping !== undefined ? payload.uxTyping : true, // Default true for customer messages
   };
   
   instance.queue.push(item);
-  console.log(`[${instanceId}] Queued ${type} (queue depth: ${instance.queue.length})`);
+  
+  // Persist to idempotency store
+  await idempotencyStore.upsert({
+    idempotencyKey,
+    instanceName: instance.name,
+    queueItemId: itemId,
+    status: 'QUEUED',
+  });
+  
+  console.log(`[${instanceId}] Queued ${type} (idempotency: ${idempotencyKey.substring(0, 20)}..., queue depth: ${instance.queue.length})`);
+  
+  // Trigger send loop if not running
+  startSendLoop(instanceId).catch(err => {
+    console.error(`[${instanceId}] Failed to start send loop:`, err);
+  });
   
   return item;
 }
 
 /**
- * Send message (immediate if ready, else queue)
+ * Send message (always enqueue for steady drain)
  */
-async function sendMessage(instanceId, chatId, message) {
+async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
   const instance = instances.get(instanceId);
   if (!instance) {
     throw new Error(`Instance ${instanceId} not found`);
   }
   
-  // If ready, send immediately (with error handling)
-  if (instance.state === InstanceState.READY && instance.client) {
-    try {
-      const sentMessage = await instance.client.sendMessage(chatId, message, { sendSeen: false });
-      return {
-        status: 'sent',
-        instanceState: instance.state,
-        queueDepth: instance.queue.length,
-        messageId: sentMessage.id?._serialized || sentMessage.id || null,
-      };
-    } catch (sendError) {
-      // If send fails due to client being null/unavailable, queue instead
-      const errorMsg = sendError.message || String(sendError);
-      if (errorMsg.includes('null') || errorMsg.includes('evaluate') || errorMsg.includes('Session closed')) {
-        console.warn(`[${instanceId}] Send failed (client unavailable), queuing instead:`, errorMsg);
-        instance.transitionTo(InstanceState.DISCONNECTED, 'Send failed - client unavailable');
-        // Fall through to queue logic below
-      } else {
-        throw sendError;
-      }
-    }
+  // Generate idempotency key if not provided
+  if (!idempotencyKey) {
+    idempotencyKey = generateIdempotencyKey('message', instance.name, { chatId, message });
   }
   
-  // Otherwise, queue and trigger ensureReady
-  const item = enqueueItem(instanceId, 'message', { chatId, message });
+  // Check idempotency first - if already sent, return success
+  const isSent = await idempotencyStore.isSent(idempotencyKey);
+  if (isSent) {
+    const record = await idempotencyStore.get(idempotencyKey);
+    return {
+      status: 'sent', // Already sent previously
+      instanceState: instance.state,
+      queueDepth: instance.queue.length,
+      messageId: record?.providerMessageId || null,
+      idempotent: true,
+    };
+  }
+  
+  // Enqueue for steady drain (no immediate send to prevent bursts)
+  const item = await enqueueItem(instanceId, 'message', { chatId, message }, idempotencyKey);
   
   // Trigger reconnection if not terminal
   if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
@@ -834,47 +1183,39 @@ async function sendMessage(instanceId, chatId, message) {
     instanceState: instance.state,
     queueDepth: instance.queue.length,
     queueId: item.id,
+    idempotencyKey: idempotencyKey.substring(0, 30) + '...', // Truncated for response
   };
 }
 
 /**
- * Send poll (immediate if ready, else queue)
+ * Send poll (always enqueue for steady drain)
  */
-async function sendPoll(instanceId, chatId, caption, options, multipleAnswers) {
+async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, idempotencyKey = null) {
   const instance = instances.get(instanceId);
   if (!instance) {
     throw new Error(`Instance ${instanceId} not found`);
   }
   
-  // If ready, send immediately (with error handling)
-  if (instance.state === InstanceState.READY && instance.client) {
-    try {
-      const { Poll } = require('whatsapp-web.js');
-      const poll = new Poll(caption, options, {
-        allowMultipleAnswers: multipleAnswers === true,
-      });
-      const sentMessage = await instance.client.sendMessage(chatId, poll, { sendSeen: false });
-      return {
-        status: 'sent',
-        instanceState: instance.state,
-        queueDepth: instance.queue.length,
-        messageId: sentMessage.id?._serialized || sentMessage.id || null,
-      };
-    } catch (sendError) {
-      // If send fails due to client being null/unavailable, queue instead
-      const errorMsg = sendError.message || String(sendError);
-      if (errorMsg.includes('null') || errorMsg.includes('evaluate') || errorMsg.includes('Session closed')) {
-        console.warn(`[${instanceId}] Send poll failed (client unavailable), queuing instead:`, errorMsg);
-        instance.transitionTo(InstanceState.DISCONNECTED, 'Send failed - client unavailable');
-        // Fall through to queue logic below
-      } else {
-        throw sendError;
-      }
-    }
+  // Generate idempotency key if not provided
+  if (!idempotencyKey) {
+    idempotencyKey = generateIdempotencyKey('poll', instance.name, { chatId, caption, options });
   }
   
-  // Otherwise, queue and trigger ensureReady
-  const item = enqueueItem(instanceId, 'poll', { chatId, caption, options, multipleAnswers });
+  // Check idempotency first - if already sent, return success
+  const isSent = await idempotencyStore.isSent(idempotencyKey);
+  if (isSent) {
+    const record = await idempotencyStore.get(idempotencyKey);
+    return {
+      status: 'sent', // Already sent previously
+      instanceState: instance.state,
+      queueDepth: instance.queue.length,
+      messageId: record?.providerMessageId || null,
+      idempotent: true,
+    };
+  }
+  
+  // Enqueue for steady drain (no immediate send to prevent bursts)
+  const item = await enqueueItem(instanceId, 'poll', { chatId, caption, options, multipleAnswers }, idempotencyKey);
   
   // Trigger reconnection if not terminal
   if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
@@ -888,6 +1229,7 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers) {
     instanceState: instance.state,
     queueDepth: instance.queue.length,
     queueId: item.id,
+    idempotencyKey: idempotencyKey.substring(0, 30) + '...', // Truncated for response
   };
 }
 
@@ -934,7 +1276,7 @@ async function deleteInstance(instanceId) {
 }
 
 /**
- * Update webhook config
+ * Update webhook config (and typing indicator settings)
  */
 function updateWebhookConfig(instanceId, webhookConfig) {
   const instance = instances.get(instanceId);
@@ -947,6 +1289,14 @@ function updateWebhookConfig(instanceId, webhookConfig) {
   }
   if (webhookConfig.events) {
     instance.webhookEvents = webhookConfig.events;
+  }
+  
+  // Typing indicator settings
+  if (webhookConfig.typingIndicatorEnabled !== undefined) {
+    instance.typingIndicatorEnabled = webhookConfig.typingIndicatorEnabled;
+  }
+  if (webhookConfig.applyTypingTo) {
+    instance.applyTypingTo = webhookConfig.applyTypingTo;
   }
   
   saveInstancesToDisk().catch(err => console.error('[Persistence] Save failed:', err.message));
@@ -981,6 +1331,8 @@ async function saveInstancesToDisk() {
       name: inst.name,
       webhookUrl: inst.webhookUrl,
       webhookEvents: inst.webhookEvents || [],
+      typingIndicatorEnabled: inst.typingIndicatorEnabled,
+      applyTypingTo: inst.applyTypingTo || ['customer'],
       createdAt: inst.createdAt ? inst.createdAt.toISOString() : null,
     }));
     
@@ -1013,6 +1365,8 @@ async function loadInstancesFromDisk() {
         await createInstance(data.id, data.name, {
           url: data.webhookUrl,
           events: data.webhookEvents || [],
+          typingIndicatorEnabled: data.typingIndicatorEnabled,
+          applyTypingTo: data.applyTypingTo,
         });
       } catch (error) {
         console.error(`[Persistence] Failed to restore ${data.id}:`, error.message);

@@ -66,6 +66,10 @@ LOG_LEVEL=info
 | `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
+| `TYPING_INDICATOR_ENABLED_DEFAULT` | Enable typing indicator by default for new instances | `true` | No |
+| `TYPING_INDICATOR_MIN_MS` | Minimum typing duration (milliseconds) | `600` | No |
+| `TYPING_INDICATOR_MAX_MS` | Maximum typing duration (milliseconds) | `1800` | No |
+| `TYPING_INDICATOR_MAX_TOTAL_MS` | Maximum total time for typing + send (safety limit) | `2500` | No |
 
 ### Authentication
 
@@ -390,19 +394,88 @@ function verifyWebhookSignature(payload, signature, secret) {
 }
 ```
 
+## Typing Indicator Feature
+
+The typing indicator feature simulates human typing before sending messages to make conversations feel more natural. This helps prevent detection patterns that could trigger WhatsApp restrictions.
+
+### Configuration
+
+**Environment Variables:**
+- `TYPING_INDICATOR_ENABLED_DEFAULT` - Enable by default for new instances (default: `false`)
+- `TYPING_INDICATOR_MIN_MS` - Minimum typing duration in milliseconds (default: `600`)
+- `TYPING_INDICATOR_MAX_MS` - Maximum typing duration in milliseconds (default: `1800`)
+- `TYPING_INDICATOR_MAX_TOTAL_MS` - Maximum total time for typing + send, safety limit (default: `2500`)
+
+**Per-Instance Configuration:**
+
+Enable typing indicator when creating an instance:
+```json
+{
+  "name": "WASP-shop.myshopify.com",
+  "webhook": {
+    "url": "https://your-webhook.com/webhooks/waapi",
+    "events": ["vote_update", "message"]
+  },
+  "typingIndicatorEnabled": true,
+  "applyTypingTo": ["customer"]
+}
+```
+
+Or update an existing instance:
+```bash
+curl -X PUT http://localhost:3000/instances/WASP-shop_myshopify_com \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "typingIndicatorEnabled": true,
+    "applyTypingTo": ["customer"]
+  }'
+```
+
+### Behavior
+
+- **Enabled by default:** `true` (can be disabled via config or per-instance)
+- **Applies to:** Customer-facing messages/polls only (not merchant notifications by default)
+- **Duration:** Random between `MIN_MS` and `MAX_MS` (default: 600-1800ms)
+- **Safety:** Hard limit of `MAX_TOTAL_MS` (2500ms) prevents indefinite typing
+- **Requirements:** 
+  - Instance must be in `READY` state
+  - Only applies to direct customer chats (skips groups)
+  - Never blocks indefinitely (timeout protection)
+
+### Safety Constraints
+
+- Typing indicator never runs if instance is not `READY`
+- Always clears typing state in `finally` block (even if send fails)
+- If typing fails, message still sends (fail-safe)
+- Maximum duration enforced to prevent long "typing" periods
+- Does not apply to merchant notifications unless explicitly enabled via `applyTypingTo`
+
+### Logging
+
+All typing indicator activity is logged with structured format:
+```
+[instanceName] [Typing] Applied: true, typingMs: 1200, chatId: ***4599
+[instanceName] [Typing] Skipped: chat_not_found (chatId: ***4599)
+```
+
 ## Project Structure
 
 ```
 wa-hub/
 ├── src/
-│   ├── index.js          # Main Express application
-│   ├── router.js         # API routes
-│   ├── sessions.js       # Session manager
-│   ├── config.js         # Configuration
-│   └── utils.js          # Utility functions
-├── ecosystem.config.js   # PM2 configuration
-├── .env                  # Environment variables (create this)
-├── .wwebjs_auth/         # WhatsApp session data (auto-created)
+│   ├── index.js              # Main Express application
+│   ├── router.js             # API routes
+│   ├── instance-manager.js   # Instance lifecycle management
+│   ├── sessions.js           # Session manager (legacy)
+│   ├── config.js             # Configuration
+│   ├── utils.js              # Utility functions
+│   ├── utils/
+│   │   └── typingIndicator.js # Typing indicator utility
+│   └── idempotency-store.js  # Idempotency persistence
+├── ecosystem.config.js       # PM2 configuration
+├── .env                      # Environment variables (create this)
+├── .wwebjs_auth/             # WhatsApp session data (auto-created)
 └── README.md
 ```
 

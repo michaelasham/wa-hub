@@ -6,6 +6,7 @@
 const express = require('express');
 const instanceManager = require('./instance-manager');
 const { InstanceState } = require('./instance-manager');
+const config = require('./config');
 const { 
   formatPhoneForWhatsApp, 
   extractPhoneNumber,
@@ -165,16 +166,23 @@ router.put('/instances/:id', (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    const { name, webhook } = req.body;
+    const { name, webhook, typingIndicatorEnabled, applyTypingTo } = req.body;
 
     // Update name if provided
     if (name && typeof name === 'string') {
       instance.name = name;
     }
 
-    // Update webhook configuration if provided
-    if (webhook) {
-      instanceManager.updateWebhookConfig(instanceId, webhook);
+    // Update webhook configuration if provided (also handles typing indicator settings)
+    if (webhook || typingIndicatorEnabled !== undefined || applyTypingTo) {
+      const configUpdate = { ...webhook };
+      if (typingIndicatorEnabled !== undefined) {
+        configUpdate.typingIndicatorEnabled = typingIndicatorEnabled;
+      }
+      if (applyTypingTo) {
+        configUpdate.applyTypingTo = applyTypingTo;
+      }
+      instanceManager.updateWebhookConfig(instanceId, configUpdate);
     }
 
     res.json(createSuccessResponse({
@@ -582,6 +590,140 @@ router.post('/instances/:id/client/action/logout', async (req, res) => {
     }));
   } catch (error) {
     console.error('Error logging out instance:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * GET /instances/:id/status
+ * Get comprehensive instance status (health endpoint with full context)
+ */
+router.get('/instances/:id/status', async (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
+      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
+    }
+
+    // Calculate counters from timestamp arrays
+    const now = Date.now();
+    const oneHourAgo = now - 3600000;
+    const oneDayAgo = now - 86400000;
+    
+    const sent24h = instance.counters.sent24h.filter(ts => ts > oneDayAgo).length;
+    const sent1h = instance.counters.sent1h.filter(ts => ts > oneHourAgo).length;
+    const failures1h = instance.counters.failures1h.filter(ts => ts > oneHourAgo).length;
+    const disconnects1h = instance.counters.disconnects1h.filter(ts => ts > oneHourAgo).length;
+    
+    res.json(createSuccessResponse({
+      instance: {
+        id: instance.id,
+        name: instance.name,
+        state: instance.state,
+        status: mapInstanceStateToStatus(instance.state),
+        createdAt: instance.createdAt?.toISOString() || null,
+      },
+      client: {
+        phoneNumber: instance.phoneNumber || null,
+        displayName: instance.displayName || null,
+        lastReadyAt: instance.lastReadyAt?.toISOString() || null,
+        lastDisconnectAt: instance.lastDisconnectAt?.toISOString() || null,
+        lastDisconnectReason: instance.lastDisconnectReason || null,
+        lastAuthFailureAt: instance.lastAuthFailureAt?.toISOString() || null,
+        lastEvent: instance.lastEvent || null,
+      },
+      queue: {
+        depth: instance.queue.length,
+        sendLoopRunning: instance.sendLoopRunning || false,
+        maxSize: config.maxQueueSize,
+      },
+      reconnection: {
+        restartAttempts: instance.restartAttempts,
+        lastRestartAt: instance.lastRestartAt?.toISOString() || null,
+        restartHistoryLength: instance.restartHistory?.length || 0,
+        rateLimitExceeded: instance.checkRestartRateLimit ? instance.checkRestartRateLimit() : false,
+      },
+      rateLimits: {
+        sendsPerMinute: {
+          current: instance.sendHistory1min?.length || 0,
+          max: config.maxSendsPerMinute,
+          limited: instance.isRateLimitedPerMinute ? instance.isRateLimitedPerMinute() : false,
+        },
+        sendsPerHour: {
+          current: instance.sendHistory1hour?.length || 0,
+          max: config.maxSendsPerHour,
+          limited: instance.isRateLimitedPerHour ? instance.isRateLimitedPerHour() : false,
+        },
+      },
+      counters: {
+        sent24h,
+        sent1h,
+        failures1h,
+        disconnects1h,
+        newChats24h: instance.counters.newChats24h.filter(ts => ts > oneDayAgo).length,
+      },
+      webhook: {
+        url: instance.webhookUrl || null,
+        events: instance.webhookEvents || [],
+      },
+    }));
+  } catch (error) {
+    console.error('Error getting instance status:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * POST /instances/:id/restart
+ * Manually trigger soft or hard restart (for admin use)
+ */
+router.post('/instances/:id/restart', async (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
+      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
+    }
+
+    const { type = 'soft' } = req.body; // 'soft' or 'hard'
+    
+    if (!['soft', 'hard'].includes(type)) {
+      return res.status(400).json(createErrorResponse('Restart type must be "soft" or "hard"', 400));
+    }
+
+    // Terminal states: cannot restart
+    if (instance.state === InstanceState.NEEDS_QR) {
+      return res.status(400).json(createErrorResponse(
+        'Instance needs QR code scan. Cannot restart. Please scan QR code first.',
+        400
+      ));
+    }
+
+    // Trigger ensureReady (which will do soft then hard restart)
+    res.json(createSuccessResponse({
+      message: `Restart initiated (type: ${type})`,
+      instanceId,
+      currentState: instance.state,
+    }));
+
+    // Do restart in background
+    instanceManager.ensureReady(instanceId).catch(err => {
+      console.error(`[${instanceId}] Manual restart failed:`, err);
+    });
+    
+  } catch (error) {
+    console.error('Error restarting instance:', error);
     res.status(500).json(createErrorResponse(error.message, 500));
   }
 });
