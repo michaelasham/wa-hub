@@ -380,55 +380,54 @@ async function reconnectSession(sessionId) {
   try {
     console.log(`[${sessionId}] Reconnecting session...`);
 
-    // Best practice per whatsapp-web.js: destroy then reinitialize the same client
-    // But if client doesn't exist or is broken, create a new one
+    // Save session metadata we need to preserve
+    const name = session.name;
+    const webhookUrl = session.webhookUrl;
+    const webhookEvents = session.webhookEvents;
+
+    // Clean up old client if it exists
     if (session.client) {
       try {
-        // Properly destroy the existing client first
-        await session.client.destroy();
+        // Try to destroy the client gracefully, but don't fail if it's already destroyed
+        await session.client.destroy().catch((err) => {
+          console.log(`[${sessionId}] Destroy returned error (may already be destroyed):`, err.message);
+        });
         console.log(`[${sessionId}] Old client destroyed`);
       } catch (destroyError) {
-        // If destroy fails (e.g., already destroyed), that's okay - we'll create a new client
-        console.log(`[${sessionId}] Destroy failed (may already be destroyed):`, destroyError.message);
+        // If destroy fails completely, that's okay - we'll create a new client anyway
+        console.log(`[${sessionId}] Destroy error handled:`, destroyError.message);
       }
-      
-      // Remove old event listeners by creating a new client instance
-      // (reusing the same client after destroy might cause issues)
-      session.client = null;
     }
 
-    // Create new client with same configuration (will reuse LocalAuth session if valid)
-    const client = new Client({
-      authStrategy: new LocalAuth({
-        clientId: sessionId,
-      }),
-      puppeteer: {
-        headless: true,
-        executablePath: config.chromePath,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-        ],
-      },
+    // Remove old session from map temporarily (similar to delete then recreate)
+    sessions.delete(sessionId);
+
+    // Small delay to ensure cleanup is complete
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Recreate the session (similar to what happens when user creates instance with same name)
+    // This will use the same LocalAuth session if valid
+    const newSession = await createSession(sessionId, name, {
+      url: webhookUrl,
+      events: webhookEvents,
     });
 
-    session.client = client;
-    session.status = 'initializing';
-
-    // Set up event listeners (must be before initialize)
-    setupEventListeners(sessionId, client);
-
-    // Reinitialize client (will use existing LocalAuth session if valid, or request new QR if not)
-    await client.initialize();
-
     console.log(`[${sessionId}] Reconnection initiated successfully`);
+    return newSession;
   } catch (error) {
     console.error(`[${sessionId}] Reconnection failed:`, error);
-    session.status = 'disconnected';
+    // Restore session entry even if reconnection failed
+    const session = sessions.get(sessionId);
+    if (session) {
+      session.status = 'disconnected';
+    }
     throw error;
   } finally {
-    session.reconnecting = false;
+    // Clear reconnecting flag from new session if it exists
+    const session = sessions.get(sessionId);
+    if (session) {
+      session.reconnecting = false;
+    }
   }
 }
 
