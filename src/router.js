@@ -532,6 +532,31 @@ router.delete('/instances/:id', async (req, res) => {
 });
 
 /**
+ * DELETE /instances/:id/queue
+ * Clear message/poll queue for an instance
+ */
+router.delete('/instances/:id/queue', (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const result = instanceManager.clearQueue(instanceId);
+    
+    res.json(createSuccessResponse({
+      message: `Queue cleared for instance ${instanceId}`,
+      cleared: result.cleared,
+      queueDepth: result.queueDepth,
+    }));
+  } catch (error) {
+    console.error('Error clearing queue:', error);
+    res.status(404).json(createErrorResponse(error.message, 404));
+  }
+});
+
+/**
  * POST /instances/:id/client/action/logout
  * Logout instance - destroys the instance completely (same as DELETE)
  * This logs out from WhatsApp, destroys the client, and removes the instance from memory
@@ -544,13 +569,13 @@ router.post('/instances/:id/client/action/logout', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Delete session (logs out WhatsApp, destroys client, and removes from memory)
-    await sessionManager.deleteSession(instanceId);
+    // Delete instance (logs out WhatsApp, destroys client, and removes from memory)
+    await instanceManager.deleteInstance(instanceId);
 
     res.json(createSuccessResponse({
       message: `Instance ${instanceId} logged out and destroyed successfully`,

@@ -952,6 +952,25 @@ function updateWebhookConfig(instanceId, webhookConfig) {
 }
 
 /**
+ * Clear message/poll queue for an instance
+ */
+function clearQueue(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    throw new Error(`Instance ${instanceId} not found`);
+  }
+  
+  const queueSize = instance.queue.length;
+  instance.queue = [];
+  console.log(`[${instanceId}] Cleared queue (${queueSize} items removed)`);
+  
+  return {
+    cleared: queueSize,
+    queueDepth: 0,
+  };
+}
+
+/**
  * Save instances to disk
  */
 async function saveInstancesToDisk() {
@@ -1022,4 +1041,5 @@ module.exports = {
   waitForReadyEvent,
   loadInstancesFromDisk,
   saveInstancesToDisk,
+  clearQueue,
 };
