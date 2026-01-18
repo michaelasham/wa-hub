@@ -377,13 +377,18 @@ async function reconnectSession(sessionId) {
   session.reconnecting = true;
   session.lastReconnectAttempt = Date.now();
 
+  // Save session metadata we need to preserve (declare outside try for catch block access)
+  const name = session.name;
+  const webhookUrl = session.webhookUrl;
+  const webhookEvents = session.webhookEvents;
+
   try {
     console.log(`[${sessionId}] Reconnecting session...`);
 
-    // Save session metadata we need to preserve
-    const name = session.name;
-    const webhookUrl = session.webhookUrl;
-    const webhookEvents = session.webhookEvents;
+    // Validate webhook URL is present
+    if (!webhookUrl) {
+      throw new Error(`Cannot reconnect session ${sessionId}: webhook URL is missing`);
+    }
 
     // Clean up old client if it exists
     if (session.client) {
@@ -415,12 +420,25 @@ async function reconnectSession(sessionId) {
     console.log(`[${sessionId}] Reconnection initiated successfully`);
     return newSession;
   } catch (error) {
-    console.error(`[${sessionId}] Reconnection failed:`, error);
-    // Restore session entry even if reconnection failed
-    const session = sessions.get(sessionId);
-    if (session) {
-      session.status = 'disconnected';
+    console.error(`[${sessionId}] Reconnection failed:`, error.message || error);
+    
+    // Restore session entry if it doesn't exist (createSession might have failed)
+    if (!sessions.has(sessionId)) {
+      // Create a minimal session entry to restore state
+      const restoredSession = new SessionInfo(sessionId, name);
+      restoredSession.webhookUrl = webhookUrl;
+      restoredSession.webhookEvents = webhookEvents || [];
+      restoredSession.status = 'disconnected';
+      sessions.set(sessionId, restoredSession);
+      console.log(`[${sessionId}] Session restored after failed reconnection`);
+    } else {
+      // Session exists, just update status
+      const existingSession = sessions.get(sessionId);
+      if (existingSession) {
+        existingSession.status = 'disconnected';
+      }
     }
+    
     throw error;
   } finally {
     // Clear reconnecting flag from new session if it exists
