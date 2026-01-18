@@ -4,12 +4,11 @@
  */
 
 const express = require('express');
-const { Poll } = require('whatsapp-web.js');
-const sessionManager = require('./sessions');
+const instanceManager = require('./instance-manager');
+const { InstanceState } = require('./instance-manager');
 const { 
   formatPhoneForWhatsApp, 
   extractPhoneNumber,
-  mapToInstanceStatus,
   createSuccessResponse,
   createErrorResponse,
   getInstanceId,
@@ -20,42 +19,17 @@ const {
 const router = express.Router();
 
 /**
- * Wait for session to become ready (with reconnection if disconnected)
- * @param {string} instanceId - Instance ID
- * @param {number} timeoutMs - Maximum time to wait in milliseconds (default: 45000 = 45 seconds)
- * @returns {Promise<boolean>} True if ready, false if timeout or failed
+ * Map InstanceState to legacy status format for backward compatibility
  */
-async function waitForReady(instanceId, timeoutMs = 45000) {
-  const startTime = Date.now();
-  const pollInterval = 1000; // Check every second
-  
-  while (Date.now() - startTime < timeoutMs) {
-    const session = sessionManager.getSession(instanceId);
-    
-    if (!session) {
-      throw new Error(`Session ${instanceId} not found`);
-    }
-    
-    // If ready or authenticated, we're good!
-    if (session.status === 'ready' || session.status === 'authenticated') {
-      return true;
-    }
-    
-    // If disconnected, start reconnection if not already reconnecting
-    if (session.status === 'disconnected' && !session.reconnecting) {
-      console.log(`[${instanceId}] Waiting for ready: starting reconnection...`);
-      sessionManager.reconnectSession(instanceId).catch((error) => {
-        console.error(`[${instanceId}] Reconnection failed while waiting:`, error);
-      });
-    }
-    
-    // Wait before next poll
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-  }
-  
-  // Timeout reached
-  const session = sessionManager.getSession(instanceId);
-  throw new Error(`Timeout waiting for instance ${instanceId} to become ready. Current status: ${session?.status || 'unknown'}`);
+function mapInstanceStateToStatus(state) {
+  const stateMap = {
+    [InstanceState.READY]: 'ready',
+    [InstanceState.CONNECTING]: 'initializing',
+    [InstanceState.DISCONNECTED]: 'disconnected',
+    [InstanceState.NEEDS_QR]: 'qr',
+    [InstanceState.ERROR]: 'disconnected',
+  };
+  return stateMap[state] || 'disconnected';
 }
 
 /**
@@ -64,12 +38,12 @@ async function waitForReady(instanceId, timeoutMs = 45000) {
  */
 router.get('/instances', (req, res) => {
   try {
-    const allSessions = sessionManager.getAllSessions();
-    const instances = allSessions.map(session => ({
-      id: session.id,
-      name: session.name,
-      status: mapToInstanceStatus(session.status),
-      phoneNumber: session.phoneNumber || undefined,
+    const allInstances = instanceManager.getAllInstances();
+    const instances = allInstances.map(inst => ({
+      id: inst.id,
+      name: inst.name,
+      status: mapInstanceStateToStatus(inst.state),
+      phoneNumber: inst.phoneNumber || undefined,
     }));
 
     res.json(instances);
@@ -96,24 +70,24 @@ router.post('/instances', async (req, res) => {
     const sessionId = sanitizeInstanceId(name);
 
     // Check if instance already exists
-    const existing = sessionManager.getSession(sessionId);
+    const existing = instanceManager.getInstance(sessionId);
     if (existing) {
-      // If instance is ready/authenticated, return success with current status (simulates "already_connected")
-      if (existing.status === 'ready' || existing.status === 'authenticated') {
+      // If instance is ready, return success with current status (simulates "already_connected")
+      if (existing.state === InstanceState.READY) {
         return res.json(createSuccessResponse({
           instance: {
             id: sessionId,
             name: existing.name,
-            status: mapToInstanceStatus(existing.status),
+            status: mapInstanceStateToStatus(existing.state),
           },
           message: 'Instance already connected',
         }));
       }
       
       // If instance is disconnected, start reconnection in background (don't wait)
-      if (existing.status === 'disconnected') {
+      if (existing.state === InstanceState.DISCONNECTED) {
         // Start reconnection asynchronously (don't await - return immediately)
-        sessionManager.reconnectSession(sessionId).catch((error) => {
+        instanceManager.ensureReady(sessionId).catch((error) => {
           console.error(`[${sessionId}] Background reconnection failed:`, error);
         });
         
@@ -128,14 +102,14 @@ router.post('/instances', async (req, res) => {
         }));
       }
       
-      // For other statuses (qr, initializing, auth_failure), return current status
+      // For other statuses, return current status
       return res.json(createSuccessResponse({
         instance: {
           id: sessionId,
           name: existing.name,
-          status: mapToInstanceStatus(existing.status),
+          status: mapInstanceStateToStatus(existing.state),
         },
-        message: 'Instance exists with status: ' + existing.status,
+        message: 'Instance exists with status: ' + existing.state,
       }));
     }
 
@@ -150,16 +124,16 @@ router.post('/instances', async (req, res) => {
       ));
     }
 
-    // Create session
-    const session = await sessionManager.createSession(sessionId, name, webhookConfig);
+    // Create instance
+    const instance = await instanceManager.createInstance(sessionId, name, webhookConfig);
 
     // Return the sanitized sessionId as the instance ID
     // Note: Dots and other invalid chars are replaced with underscores for LocalAuth compatibility
     res.json(createSuccessResponse({
       instance: {
         id: sessionId,
-        name: session.name,
-        status: mapToInstanceStatus(session.status),
+        name: instance.name,
+        status: mapInstanceStateToStatus(instance.state),
       },
     }));
   } catch (error) {
@@ -186,8 +160,8 @@ router.put('/instances/:id', (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
@@ -195,19 +169,19 @@ router.put('/instances/:id', (req, res) => {
 
     // Update name if provided
     if (name && typeof name === 'string') {
-      session.name = name;
+      instance.name = name;
     }
 
     // Update webhook configuration if provided
     if (webhook) {
-      sessionManager.updateWebhookConfig(instanceId, webhook);
+      instanceManager.updateWebhookConfig(instanceId, webhook);
     }
 
     res.json(createSuccessResponse({
       instance: {
-        id: session.id,
-        name: session.name,
-        status: mapToInstanceStatus(session.status),
+        id: instance.id,
+        name: instance.name,
+        status: mapInstanceStateToStatus(instance.state),
       },
     }));
   } catch (error) {
@@ -228,20 +202,20 @@ router.get('/instances/:id/client/qr', (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
     // Check if QR code is available
-    if (!session.qrCode) {
+    if (!instance.qrCode) {
       return res.status(404).json(createErrorResponse('QR code not available yet. Please wait a few seconds.', 404));
     }
 
     res.json(createSuccessResponse({
       qrCode: {
         data: {
-          qr_code: session.qrCode,
+          qr_code: instance.qrCode,
         },
       },
     }));
@@ -263,30 +237,40 @@ router.get('/instances/:id/client/status', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
     // Get client state if available
     let clientState = null;
-    if (session.client) {
-      clientState = await sessionManager.getClientState(instanceId);
+    if (instance.client) {
+      try {
+        clientState = await instance.client.getState();
+      } catch (error) {
+        // Ignore errors
+      }
     }
 
-    const instanceStatus = mapToInstanceStatus(session.status);
+    const instanceStatus = mapInstanceStateToStatus(instance.state);
     const data = {};
     
-    if (session.phoneNumber) {
-      data.phoneNumber = session.phoneNumber;
-      data.formattedNumber = session.phoneNumber;
+    if (instance.phoneNumber) {
+      data.phoneNumber = instance.phoneNumber;
+      data.formattedNumber = instance.phoneNumber;
     }
 
     res.json(createSuccessResponse({
       clientStatus: {
         instanceStatus,
-        instanceId: session.id,
+        instanceId: instance.id,
         data,
+        // Enhanced status info
+        state: instance.state,
+        queueDepth: instance.queue.length,
+        lastEvent: instance.lastEvent,
+        lastDisconnectReason: instance.lastDisconnectReason,
+        restartAttempts: instance.restartAttempts,
       },
     }));
   } catch (error) {
@@ -307,23 +291,23 @@ router.get('/instances/:id/client/me', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
     // Check if client is ready
-    if (session.status !== 'ready' && session.status !== 'authenticated') {
+    if (instance.state !== InstanceState.READY) {
       return res.status(400).json(createErrorResponse(
-        `Instance is not connected. Current status: ${session.status}`,
+        `Instance is not connected. Current state: ${instance.state}`,
         400
       ));
     }
 
     // Get client info
     let clientInfo = {};
-    if (session.client && session.client.info) {
-      const info = session.client.info;
+    if (instance.client && instance.client.info) {
+      const info = instance.client.info;
       clientInfo = {
         displayName: info.pushname || null,
         contactId: info.wid?.user || null,
@@ -331,11 +315,11 @@ router.get('/instances/:id/client/me', async (req, res) => {
         profilePicUrl: null, // whatsapp-web.js doesn't provide this directly
       };
     } else {
-      // Fallback to session stored data
+      // Fallback to instance stored data
       clientInfo = {
-        displayName: session.displayName || null,
-        contactId: session.phoneNumber || null,
-        formattedNumber: session.phoneNumber || null,
+        displayName: instance.displayName || null,
+        contactId: instance.phoneNumber || null,
+        formattedNumber: instance.phoneNumber || null,
         profilePicUrl: null,
       };
     }
@@ -363,40 +347,9 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
-    }
-
-    // Check if client is ready - if disconnected or not ready, wait for reconnection
-    if (session.status !== 'ready' && session.status !== 'authenticated') {
-      if (session.status === 'disconnected' || session.status === 'initializing' || session.status === 'qr') {
-        console.log(`[${instanceId}] Instance is not ready (status: ${session.status}), waiting for reconnection before sending poll...`);
-        try {
-          await waitForReady(instanceId);
-          console.log(`[${instanceId}] Instance is now ready, proceeding with poll...`);
-          // Refresh session after waiting
-          const refreshedSession = sessionManager.getSession(instanceId);
-          if (!refreshedSession || (refreshedSession.status !== 'ready' && refreshedSession.status !== 'authenticated')) {
-            return res.status(400).json(createErrorResponse(
-              `Instance failed to become ready. Current status: ${refreshedSession?.status || 'unknown'}`,
-              400
-            ));
-          }
-          // Continue with sending poll below
-        } catch (waitError) {
-          return res.status(400).json(createErrorResponse(
-            waitError.message || 'Instance is not ready and reconnection timed out. Please try again.',
-            400
-          ));
-        }
-      } else {
-        // Other statuses (auth_failure, etc.)
-        return res.status(400).json(createErrorResponse(
-          `Instance is not connected. Current status: ${session.status}`,
-          400
-        ));
-      }
     }
 
     const { chatId, caption, options, multipleAnswers } = req.body;
@@ -419,66 +372,51 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid chatId format', 400));
     }
 
-    // Create poll
-    const poll = new Poll(caption, options, {
-      allowMultipleAnswers: multipleAnswers === true,
-    });
+    // Use instanceManager.sendPoll (handles queue automatically)
+    const result = await instanceManager.sendPoll(
+      instanceId,
+      formattedChatId,
+      caption,
+      options,
+      multipleAnswers
+    );
 
-    // Send poll
-    let message;
-    try {
-      message = await session.client.sendMessage(
-        formattedChatId,
-        poll,
-        {
-          // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
-          // in current whatsapp-web.js / WhatsApp Web versions.
-          // This does not affect WAAPI semantics (we only guarantee that the poll is sent).
-          sendSeen: false,
-        },
-      );
-    } catch (sendError) {
-      // Check if it's a session closed error
-      const errorMessage = sendError.message || String(sendError);
-      if (errorMessage.includes('Session closed') || 
-          errorMessage.includes('page has been closed') ||
-          errorMessage.includes('Protocol error')) {
-        // Update session status if we detect it's closed
-        session.status = 'disconnected';
-        return res.status(400).json(createErrorResponse(
-          'Client session is closed. The WhatsApp Web session was disconnected. Please check the instance status and reconnect if needed.',
-          400
-        ));
-      }
-      // Re-throw other errors
-      throw sendError;
+    // Return result with enhanced info
+    if (result.status === 'sent') {
+      res.json(createSuccessResponse({
+        messageId: result.messageId,
+        status: result.status,
+        instanceState: result.instanceState,
+        queueDepth: result.queueDepth,
+      }));
+    } else if (result.status === 'queued') {
+      res.status(202).json(createSuccessResponse({
+        status: result.status,
+        instanceState: result.instanceState,
+        queueDepth: result.queueDepth,
+        queueId: result.queueId,
+        message: 'Message queued. Will be sent when instance becomes ready.',
+      }));
+    } else {
+      res.status(400).json(createErrorResponse(result.error || 'Failed to send poll', 400));
     }
-
-    res.json(createSuccessResponse({
-      messageId: message.id?._serialized || message.id || null,
-    }));
   } catch (error) {
     console.error('Error sending poll:', error);
     const errorMessage = error.message || String(error);
-    if (errorMessage.includes('Session closed') || 
-        errorMessage.includes('page has been closed') ||
-        errorMessage.includes('Protocol error')) {
-      // Start reconnection in background (fire-and-forget)
-      const instanceId = sanitizeInstanceId(getInstanceId(req.params));
-      const session = sessionManager.getSession(instanceId);
-      if (session) {
-        session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected in outer catch, starting automatic reconnection in background...`);
-        sessionManager.reconnectSession(instanceId).catch((error) => {
-          console.error(`[${instanceId}] Background reconnection failed:`, error);
-        });
-        
-        return res.status(400).json(createErrorResponse(
-          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
-          400
-        ));
-      }
+    
+    // Handle terminal states
+    if (errorMessage.includes('needs QR') || errorMessage.includes('NEEDS_QR')) {
+      return res.status(400).json(createErrorResponse(
+        'Instance needs QR code scan. Please check the instance status and scan QR code.',
+        400
+      ));
     }
+    
+    // Handle queue full
+    if (errorMessage.includes('Queue full')) {
+      return res.status(429).json(createErrorResponse(errorMessage, 429));
+    }
+    
     res.status(500).json(createErrorResponse(errorMessage, 500));
   }
 });
@@ -495,40 +433,9 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
-    }
-
-    // Check if client is ready - if disconnected or not ready, wait for reconnection
-    if (session.status !== 'ready' && session.status !== 'authenticated') {
-      if (session.status === 'disconnected' || session.status === 'initializing' || session.status === 'qr') {
-        console.log(`[${instanceId}] Instance is not ready (status: ${session.status}), waiting for reconnection before sending message...`);
-        try {
-          await waitForReady(instanceId);
-          console.log(`[${instanceId}] Instance is now ready, proceeding with message...`);
-          // Refresh session after waiting
-          const refreshedSession = sessionManager.getSession(instanceId);
-          if (!refreshedSession || (refreshedSession.status !== 'ready' && refreshedSession.status !== 'authenticated')) {
-            return res.status(400).json(createErrorResponse(
-              `Instance failed to become ready. Current status: ${refreshedSession?.status || 'unknown'}`,
-              400
-            ));
-          }
-          // Continue with sending message below
-        } catch (waitError) {
-          return res.status(400).json(createErrorResponse(
-            waitError.message || 'Instance is not ready and reconnection timed out. Please try again.',
-            400
-          ));
-        }
-      } else {
-        // Other statuses (auth_failure, etc.)
-        return res.status(400).json(createErrorResponse(
-          `Instance is not connected. Current status: ${session.status}`,
-          400
-        ));
-      }
     }
 
     const { chatId, message } = req.body;
@@ -547,67 +454,49 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid chatId format', 400));
     }
 
-    // Send message
-    let sentMessage;
-    try {
-      sentMessage = await session.client.sendMessage(
-        formattedChatId,
-        message,
-        {
-          // Avoid calling window.WWebJS.sendSeen to prevent upstream 'markedUnread' errors
-          // in current whatsapp-web.js / WhatsApp Web versions.
-          // This does not affect WAAPI semantics (we only guarantee that the message is sent).
-          sendSeen: false,
-        },
-      );
-    } catch (sendError) {
-      // Check if it's a session closed error
-      const errorMessage = sendError.message || String(sendError);
-      if (errorMessage.includes('Session closed') || 
-          errorMessage.includes('page has been closed') ||
-          errorMessage.includes('Protocol error')) {
-        // Update status and start reconnection in background (fire-and-forget)
-        session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected, starting automatic reconnection in background...`);
-        sessionManager.reconnectSession(instanceId).catch((error) => {
-          console.error(`[${instanceId}] Background reconnection failed:`, error);
-        });
-        
-        // Return immediately with clear message to retry
-        return res.status(400).json(createErrorResponse(
-          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
-          400
-        ));
-      }
-      // Re-throw other errors
-      throw sendError;
-    }
+    // Use instanceManager.sendMessage (handles queue automatically)
+    const result = await instanceManager.sendMessage(
+      instanceId,
+      formattedChatId,
+      message
+    );
 
-    res.json(createSuccessResponse({
-      messageId: sentMessage.id?._serialized || sentMessage.id || null,
-    }));
+    // Return result with enhanced info
+    if (result.status === 'sent') {
+      res.json(createSuccessResponse({
+        messageId: result.messageId,
+        status: result.status,
+        instanceState: result.instanceState,
+        queueDepth: result.queueDepth,
+      }));
+    } else if (result.status === 'queued') {
+      res.status(202).json(createSuccessResponse({
+        status: result.status,
+        instanceState: result.instanceState,
+        queueDepth: result.queueDepth,
+        queueId: result.queueId,
+        message: 'Message queued. Will be sent when instance becomes ready.',
+      }));
+    } else {
+      res.status(400).json(createErrorResponse(result.error || 'Failed to send message', 400));
+    }
   } catch (error) {
     console.error('Error sending message:', error);
     const errorMessage = error.message || String(error);
-    if (errorMessage.includes('Session closed') || 
-        errorMessage.includes('page has been closed') ||
-        errorMessage.includes('Protocol error')) {
-      // Start reconnection in background (fire-and-forget)
-      const instanceId = sanitizeInstanceId(getInstanceId(req.params));
-      const session = sessionManager.getSession(instanceId);
-      if (session) {
-        session.status = 'disconnected';
-        console.log(`[${instanceId}] Session closed error detected in outer catch, starting automatic reconnection in background...`);
-        sessionManager.reconnectSession(instanceId).catch((error) => {
-          console.error(`[${instanceId}] Background reconnection failed:`, error);
-        });
-        
-        return res.status(400).json(createErrorResponse(
-          'Client session was closed. Automatic reconnection has been initiated. Please retry in a few seconds.',
-          400
-        ));
-      }
+    
+    // Handle terminal states
+    if (errorMessage.includes('needs QR') || errorMessage.includes('NEEDS_QR')) {
+      return res.status(400).json(createErrorResponse(
+        'Instance needs QR code scan. Please check the instance status and scan QR code.',
+        400
+      ));
     }
+    
+    // Handle queue full
+    if (errorMessage.includes('Queue full')) {
+      return res.status(429).json(createErrorResponse(errorMessage, 429));
+    }
+    
     res.status(500).json(createErrorResponse(errorMessage, 500));
   }
 });
@@ -625,13 +514,13 @@ router.delete('/instances/:id', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const session = sessionManager.getSession(instanceId);
-    if (!session) {
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Delete session (logs out WhatsApp, destroys client, and removes from memory)
-    await sessionManager.deleteSession(instanceId);
+    // Delete instance (logs out WhatsApp, destroys client, and removes from memory)
+    await instanceManager.deleteInstance(instanceId);
 
     res.json(createSuccessResponse({
       message: `Instance ${instanceId} deleted and destroyed successfully`,

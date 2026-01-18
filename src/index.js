@@ -7,7 +7,7 @@ const express = require('express');
 const config = require('./config');
 const router = require('./router');
 const { authenticateApiKey } = require('./auth');
-const sessionManager = require('./sessions');
+const instanceManager = require('./instance-manager');
 
 const app = express();
 
@@ -73,7 +73,7 @@ const port = config.port;
 (async () => {
   try {
     console.log('[Startup] Restoring instances from disk...');
-    await sessionManager.loadInstancesFromDisk();
+    await instanceManager.loadInstancesFromDisk();
   } catch (error) {
     console.error('[Startup] Error restoring instances:', error);
     // Continue startup even if restoration fails
