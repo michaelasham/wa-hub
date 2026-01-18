@@ -59,10 +59,45 @@ router.post('/instances', async (req, res) => {
     // Check if instance already exists
     const existing = sessionManager.getSession(sessionId);
     if (existing) {
-      return res.status(400).json(createErrorResponse(
-        `Instance with name "${name}" already exists (ID: ${sessionId}). Use the existing instance instead of creating a duplicate.`,
-        400
-      ));
+      // If instance is ready/authenticated, return success with current status (simulates "already_connected")
+      if (existing.status === 'ready' || existing.status === 'authenticated') {
+        return res.json(createSuccessResponse({
+          instance: {
+            id: sessionId,
+            name: existing.name,
+            status: mapToInstanceStatus(existing.status),
+          },
+          message: 'Instance already connected',
+        }));
+      }
+      
+      // If instance is disconnected, start reconnection in background (don't wait)
+      if (existing.status === 'disconnected') {
+        // Start reconnection asynchronously (don't await - return immediately)
+        sessionManager.reconnectSession(sessionId).catch((error) => {
+          console.error(`[${sessionId}] Background reconnection failed:`, error);
+        });
+        
+        // Return immediately with current status
+        return res.json(createSuccessResponse({
+          instance: {
+            id: sessionId,
+            name: existing.name,
+            status: 'initializing', // Reconnection in progress
+          },
+          message: 'Reconnection initiated',
+        }));
+      }
+      
+      // For other statuses (qr, initializing, auth_failure), return current status
+      return res.json(createSuccessResponse({
+        instance: {
+          id: sessionId,
+          name: existing.name,
+          status: mapToInstanceStatus(existing.status),
+        },
+        message: 'Instance exists with status: ' + existing.status,
+      }));
     }
 
     // Get webhook config from request body (required)
