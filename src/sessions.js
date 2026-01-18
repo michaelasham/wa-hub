@@ -380,17 +380,24 @@ async function reconnectSession(sessionId) {
   try {
     console.log(`[${sessionId}] Reconnecting session...`);
 
-    // Clean up old client if it exists
+    // Best practice per whatsapp-web.js: destroy then reinitialize the same client
+    // But if client doesn't exist or is broken, create a new one
     if (session.client) {
       try {
-        // Don't call logout/destroy on a disconnected client - just clear the reference
-        session.client = null;
-      } catch (error) {
-        console.error(`[${sessionId}] Error cleaning up old client:`, error);
+        // Properly destroy the existing client first
+        await session.client.destroy();
+        console.log(`[${sessionId}] Old client destroyed`);
+      } catch (destroyError) {
+        // If destroy fails (e.g., already destroyed), that's okay - we'll create a new client
+        console.log(`[${sessionId}] Destroy failed (may already be destroyed):`, destroyError.message);
       }
+      
+      // Remove old event listeners by creating a new client instance
+      // (reusing the same client after destroy might cause issues)
+      session.client = null;
     }
 
-    // Create new client with same configuration
+    // Create new client with same configuration (will reuse LocalAuth session if valid)
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: sessionId,
@@ -409,7 +416,7 @@ async function reconnectSession(sessionId) {
     session.client = client;
     session.status = 'initializing';
 
-    // Set up event listeners
+    // Set up event listeners (must be before initialize)
     setupEventListeners(sessionId, client);
 
     // Reinitialize client (will use existing LocalAuth session if valid, or request new QR if not)
