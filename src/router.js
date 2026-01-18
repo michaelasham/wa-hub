@@ -20,6 +20,45 @@ const {
 const router = express.Router();
 
 /**
+ * Wait for session to become ready (with reconnection if disconnected)
+ * @param {string} instanceId - Instance ID
+ * @param {number} timeoutMs - Maximum time to wait in milliseconds (default: 45000 = 45 seconds)
+ * @returns {Promise<boolean>} True if ready, false if timeout or failed
+ */
+async function waitForReady(instanceId, timeoutMs = 45000) {
+  const startTime = Date.now();
+  const pollInterval = 1000; // Check every second
+  
+  while (Date.now() - startTime < timeoutMs) {
+    const session = sessionManager.getSession(instanceId);
+    
+    if (!session) {
+      throw new Error(`Session ${instanceId} not found`);
+    }
+    
+    // If ready or authenticated, we're good!
+    if (session.status === 'ready' || session.status === 'authenticated') {
+      return true;
+    }
+    
+    // If disconnected, start reconnection if not already reconnecting
+    if (session.status === 'disconnected' && !session.reconnecting) {
+      console.log(`[${instanceId}] Waiting for ready: starting reconnection...`);
+      sessionManager.reconnectSession(instanceId).catch((error) => {
+        console.error(`[${instanceId}] Reconnection failed while waiting:`, error);
+      });
+    }
+    
+    // Wait before next poll
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+  }
+  
+  // Timeout reached
+  const session = sessionManager.getSession(instanceId);
+  throw new Error(`Timeout waiting for instance ${instanceId} to become ready. Current status: ${session?.status || 'unknown'}`);
+}
+
+/**
  * GET /instances
  * List all instances
  */
@@ -329,24 +368,35 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready - if disconnected, start reconnection in background and return immediately
-    if (session.status === 'disconnected') {
-      console.log(`[${instanceId}] Instance is disconnected, starting automatic reconnection in background...`);
-      // Start reconnection in background (fire-and-forget, don't block)
-      sessionManager.reconnectSession(instanceId).catch((error) => {
-        console.error(`[${instanceId}] Background reconnection failed:`, error);
-      });
-      
-      // Return immediately with clear message to retry
-      return res.status(400).json(createErrorResponse(
-        'Instance is disconnected. Automatic reconnection has been initiated. Please retry in a few seconds.',
-        400
-      ));
-    } else if (session.status !== 'ready' && session.status !== 'authenticated') {
-      return res.status(400).json(createErrorResponse(
-        `Instance is not connected. Current status: ${session.status}`,
-        400
-      ));
+    // Check if client is ready - if disconnected or not ready, wait for reconnection
+    if (session.status !== 'ready' && session.status !== 'authenticated') {
+      if (session.status === 'disconnected' || session.status === 'initializing' || session.status === 'qr') {
+        console.log(`[${instanceId}] Instance is not ready (status: ${session.status}), waiting for reconnection before sending poll...`);
+        try {
+          await waitForReady(instanceId);
+          console.log(`[${instanceId}] Instance is now ready, proceeding with poll...`);
+          // Refresh session after waiting
+          const refreshedSession = sessionManager.getSession(instanceId);
+          if (!refreshedSession || (refreshedSession.status !== 'ready' && refreshedSession.status !== 'authenticated')) {
+            return res.status(400).json(createErrorResponse(
+              `Instance failed to become ready. Current status: ${refreshedSession?.status || 'unknown'}`,
+              400
+            ));
+          }
+          // Continue with sending poll below
+        } catch (waitError) {
+          return res.status(400).json(createErrorResponse(
+            waitError.message || 'Instance is not ready and reconnection timed out. Please try again.',
+            400
+          ));
+        }
+      } else {
+        // Other statuses (auth_failure, etc.)
+        return res.status(400).json(createErrorResponse(
+          `Instance is not connected. Current status: ${session.status}`,
+          400
+        ));
+      }
     }
 
     const { chatId, caption, options, multipleAnswers } = req.body;
@@ -450,24 +500,35 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    // Check if client is ready - if disconnected, start reconnection in background and return immediately
-    if (session.status === 'disconnected') {
-      console.log(`[${instanceId}] Instance is disconnected, starting automatic reconnection in background...`);
-      // Start reconnection in background (fire-and-forget, don't block)
-      sessionManager.reconnectSession(instanceId).catch((error) => {
-        console.error(`[${instanceId}] Background reconnection failed:`, error);
-      });
-      
-      // Return immediately with clear message to retry
-      return res.status(400).json(createErrorResponse(
-        'Instance is disconnected. Automatic reconnection has been initiated. Please retry in a few seconds.',
-        400
-      ));
-    } else if (session.status !== 'ready' && session.status !== 'authenticated') {
-      return res.status(400).json(createErrorResponse(
-        `Instance is not connected. Current status: ${session.status}`,
-        400
-      ));
+    // Check if client is ready - if disconnected or not ready, wait for reconnection
+    if (session.status !== 'ready' && session.status !== 'authenticated') {
+      if (session.status === 'disconnected' || session.status === 'initializing' || session.status === 'qr') {
+        console.log(`[${instanceId}] Instance is not ready (status: ${session.status}), waiting for reconnection before sending message...`);
+        try {
+          await waitForReady(instanceId);
+          console.log(`[${instanceId}] Instance is now ready, proceeding with message...`);
+          // Refresh session after waiting
+          const refreshedSession = sessionManager.getSession(instanceId);
+          if (!refreshedSession || (refreshedSession.status !== 'ready' && refreshedSession.status !== 'authenticated')) {
+            return res.status(400).json(createErrorResponse(
+              `Instance failed to become ready. Current status: ${refreshedSession?.status || 'unknown'}`,
+              400
+            ));
+          }
+          // Continue with sending message below
+        } catch (waitError) {
+          return res.status(400).json(createErrorResponse(
+            waitError.message || 'Instance is not ready and reconnection timed out. Please try again.',
+            400
+          ));
+        }
+      } else {
+        // Other statuses (auth_failure, etc.)
+        return res.status(400).json(createErrorResponse(
+          `Instance is not connected. Current status: ${session.status}`,
+          400
+        ));
+      }
     }
 
     const { chatId, message } = req.body;
