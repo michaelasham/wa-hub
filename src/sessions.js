@@ -5,6 +5,8 @@
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const axios = require('axios');
+const fs = require('fs').promises;
+const path = require('path');
 const config = require('./config');
 const { qrToBase64, extractPhoneNumber } = require('./utils');
 
@@ -97,6 +99,9 @@ async function createSession(sessionId, name, webhookConfig = {}) {
   }
   sessionInfo.webhookUrl = webhookConfig.url;
   sessionInfo.webhookEvents = webhookConfig.events || [];
+
+  // Save to disk (async, don't wait)
+  saveInstancesToDisk().catch(err => console.error('[Persistence] Failed to save after create:', err.message));
 
   // Create WhatsApp client using system Chromium
   const client = new Client({
@@ -328,6 +333,9 @@ async function deleteSession(sessionId) {
     // Step 3: Remove session from memory (instance is now completely destroyed)
     sessions.delete(sessionId);
     console.log(`[${sessionId}] Session removed from memory`);
+    
+    // Save to disk (async, don't wait)
+    saveInstancesToDisk().catch(err => console.error('[Persistence] Failed to save after delete:', err.message));
   }
 }
 
@@ -349,6 +357,9 @@ function updateWebhookConfig(sessionId, webhookConfig) {
   if (webhookConfig.events && Array.isArray(webhookConfig.events)) {
     session.webhookEvents = webhookConfig.events;
   }
+
+  // Save to disk (async, don't wait)
+  saveInstancesToDisk().catch(err => console.error('[Persistence] Failed to save after update:', err.message));
 }
 
 /**
@@ -469,6 +480,86 @@ async function getClientState(sessionId) {
   }
 }
 
+/**
+ * Save instance metadata to disk for persistence across restarts
+ * @returns {Promise<void>}
+ */
+async function saveInstancesToDisk() {
+  try {
+    const instancesData = Array.from(sessions.values()).map(session => ({
+      id: session.id,
+      name: session.name,
+      webhookUrl: session.webhookUrl,
+      webhookEvents: session.webhookEvents || [],
+      createdAt: session.createdAt ? session.createdAt.toISOString() : null,
+    }));
+
+    const dataDir = path.dirname(config.instancesDataPath);
+    try {
+      await fs.mkdir(dataDir, { recursive: true });
+    } catch (error) {
+      // Directory might already exist, that's fine
+    }
+
+    await fs.writeFile(config.instancesDataPath, JSON.stringify(instancesData, null, 2));
+    console.log(`[Persistence] Saved ${instancesData.length} instance(s) to disk`);
+  } catch (error) {
+    console.error('[Persistence] Error saving instances to disk:', error.message);
+    // Don't throw - persistence failures shouldn't break the service
+  }
+}
+
+/**
+ * Load instance metadata from disk and restore instances
+ * @returns {Promise<void>}
+ */
+async function loadInstancesFromDisk() {
+  try {
+    const data = await fs.readFile(config.instancesDataPath, 'utf8');
+    const instancesData = JSON.parse(data);
+
+    if (!Array.isArray(instancesData) || instancesData.length === 0) {
+      console.log('[Persistence] No instances found on disk to restore');
+      return;
+    }
+
+    console.log(`[Persistence] Found ${instancesData.length} instance(s) to restore from disk`);
+
+    // Restore each instance asynchronously (don't block startup)
+    const restorePromises = instancesData.map(async (instanceData) => {
+      try {
+        const { id, name, webhookUrl, webhookEvents } = instanceData;
+        
+        if (!id || !name || !webhookUrl) {
+          console.warn(`[Persistence] Skipping invalid instance data:`, instanceData);
+          return;
+        }
+
+        // Create session (will use existing LocalAuth session if valid)
+        await createSession(id, name, {
+          url: webhookUrl,
+          events: webhookEvents || [],
+        });
+        console.log(`[Persistence] Restored instance: ${name} (${id})`);
+      } catch (error) {
+        console.error(`[Persistence] Failed to restore instance ${instanceData.id}:`, error.message);
+        // Continue with other instances even if one fails
+      }
+    });
+
+    // Wait for all restorations to complete (but don't fail if some fail)
+    await Promise.allSettled(restorePromises);
+    console.log('[Persistence] Instance restoration completed');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      console.log('[Persistence] No instances file found - starting fresh');
+    } else {
+      console.error('[Persistence] Error loading instances from disk:', error.message);
+    }
+    // Don't throw - if file doesn't exist or is invalid, we start fresh
+  }
+}
+
 module.exports = {
   createSession,
   getSession,
@@ -477,5 +568,7 @@ module.exports = {
   updateWebhookConfig,
   getClientState,
   reconnectSession,
+  saveInstancesToDisk,
+  loadInstancesFromDisk,
 };
 

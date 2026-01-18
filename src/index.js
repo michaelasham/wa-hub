@@ -7,6 +7,7 @@ const express = require('express');
 const config = require('./config');
 const router = require('./router');
 const { authenticateApiKey } = require('./auth');
+const sessionManager = require('./sessions');
 
 const app = express();
 
@@ -65,31 +66,44 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Start server
+// Start server and restore instances
 const port = config.port;
-const server = app.listen(port, () => {
-  console.log(`wa-hub service started on port ${port}`);
-  console.log(`Health check: http://localhost:${port}/health`);
-  console.log('Webhook: Each instance must provide its own webhook URL');
-  console.log('Press Ctrl+C to stop the server');
-});
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
+// Restore instances from disk before starting server, then start server
+(async () => {
+  try {
+    console.log('[Startup] Restoring instances from disk...');
+    await sessionManager.loadInstancesFromDisk();
+  } catch (error) {
+    console.error('[Startup] Error restoring instances:', error);
+    // Continue startup even if restoration fails
+  }
 
-process.on('SIGINT', () => {
-  console.log('\nSIGINT received, shutting down gracefully');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+  const server = app.listen(port, () => {
+    console.log(`wa-hub service started on port ${port}`);
+    console.log(`Health check: http://localhost:${port}/health`);
+    console.log('Webhook: Each instance must provide its own webhook URL');
+    console.log('Press Ctrl+C to stop the server');
   });
-});
+
+  // Setup graceful shutdown handlers
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    server.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
+  });
+
+  process.on('SIGINT', () => {
+    console.log('\nSIGINT received, shutting down gracefully');
+    server.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
+  });
+})();
+
 
 module.exports = app;
 

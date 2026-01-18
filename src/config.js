@@ -19,6 +19,9 @@ const config = {
   // WhatsApp session storage path
   sessionDataPath: process.env.SESSION_DATA_PATH || './.wwebjs_auth',
   
+  // Instance metadata persistence file (for restoring instances on restart)
+  instancesDataPath: process.env.INSTANCES_DATA_PATH || './.wwebjs_instances.json',
+  
   // Chromium/Chrome executable path (for Puppeteer)
   chromePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser', // Fallback: /usr/bin/chromium
   
