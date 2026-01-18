@@ -287,15 +287,16 @@ async function createClient(instanceId, instanceName) {
     console.warn(`[${instanceId}] Could not create auth directory:`, error.message);
   }
   
-  // Migrate old session data if it exists (backward compatibility)
-  await migrateOldSessionData(instanceId, authDataPath).catch(err => {
-    console.warn(`[${instanceId}] Session migration failed (non-critical):`, err.message);
-  });
+  // Use default LocalAuth path (same as old sessions.js) for backward compatibility
+  // When dataPath is not specified, LocalAuth uses: .wwebjs_auth/session-{clientId}/
+  // This matches the old behavior where instances auto-reconnected after restart
+  const sanitizedClientId = sanitizeInstanceId(instanceId);
   
   return new Client({
     authStrategy: new LocalAuth({
-      clientId: sanitizeInstanceId(instanceId),
-      dataPath: authDataPath,
+      clientId: sanitizedClientId,
+      // Don't specify dataPath - use LocalAuth default (.wwebjs_auth/session-{clientId}/)
+      // This ensures backward compatibility with existing session data
     }),
     puppeteer: {
       headless: true,
