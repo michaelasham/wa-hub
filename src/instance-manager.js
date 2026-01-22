@@ -1251,7 +1251,7 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
   console.log(`[${instanceId}] Queued ${type} (idempotency: ${idempotencyKey.substring(0, 20)}..., queue depth: ${instance.queue.length})`);
   
   // Trigger send loop if not running
-  startSendLoop(instanceId).catch(err => {
+  Promise.resolve(startSendLoop(instanceId)).catch(err => {
     console.error(`[${instanceId}] Failed to start send loop:`, err);
   });
   
