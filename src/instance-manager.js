@@ -582,7 +582,7 @@ function setupEventListeners(instanceId, client) {
       instance.transitionTo(InstanceState.DISCONNECTED, reason);
       // Auto-reconnect on non-terminal disconnect (with throttling)
       if (!instance.reconnectionLock && !instance.checkRestartRateLimit()) {
-        ensureReady(instanceId).catch(err => {
+        Promise.resolve(ensureReady(instanceId)).catch(err => {
           console.error(`[${instanceId}] Auto-reconnect failed:`, err);
         });
       }
@@ -864,7 +864,7 @@ async function processQueueItem(instanceId, item) {
   if (instance.state !== InstanceState.READY) {
     // Trigger ensureReady if not terminal
     if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
-      ensureReady(instanceId).catch(err => {
+      Promise.resolve(ensureReady(instanceId)).catch(err => {
         console.error(`[${instanceId}] ensureReady failed:`, err);
       });
     }
@@ -944,7 +944,7 @@ async function processQueueItem(instanceId, item) {
       
       // Trigger reconnection
       if (instance.state !== InstanceState.NEEDS_QR) {
-        ensureReady(instanceId).catch(err => {
+        Promise.resolve(ensureReady(instanceId)).catch(err => {
           console.error(`[${instanceId}] Reconnection failed:`, err);
         });
       }
@@ -1290,7 +1290,7 @@ async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
   
   // Trigger reconnection if not terminal
   if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
-    ensureReady(instanceId).catch(err => {
+    Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
   }
@@ -1336,7 +1336,7 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, i
   
   // Trigger reconnection if not terminal
   if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
-    ensureReady(instanceId).catch(err => {
+    Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
   }
