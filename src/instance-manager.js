@@ -1009,16 +1009,28 @@ async function runSendLoop(instanceId) {
   }
   
   // Process first eligible item
-  const item = itemsToProcess[0];
-  console.log(`[${instanceId}] runSendLoop: Processing item ${item.id} (${item.type}), ${itemsToProcess.length} eligible, ${instance.queue.length} total in queue`);
-  const shouldRemove = await processQueueItem(instanceId, item);
-  
-  if (shouldRemove) {
-    // Remove from queue
-    const index = instance.queue.findIndex(q => q.id === item.id);
-    if (index !== -1) {
-      instance.queue.splice(index, 1);
+  try {
+    const item = itemsToProcess[0];
+    console.log(`[${instanceId}] runSendLoop: Processing item ${item.id} (${item.type}), ${itemsToProcess.length} eligible, ${instance.queue.length} total in queue`);
+    const shouldRemove = await processQueueItem(instanceId, item);
+    
+    if (shouldRemove) {
+      // Remove from queue
+      const index = instance.queue.findIndex(q => q.id === item.id);
+      if (index !== -1) {
+        instance.queue.splice(index, 1);
+        console.log(`[${instanceId}] Removed item ${item.id} from queue, ${instance.queue.length} items remaining`);
+      }
     }
+  } catch (error) {
+    // Unexpected error in processQueueItem - log but continue loop
+    console.error(`[${instanceId}] Unexpected error in runSendLoop:`, error);
+    instance.sendLoopRunning = false;
+    // Restart loop after a delay
+    setTimeout(() => {
+      startSendLoop(instanceId);
+    }, 2000);
+    return;
   }
   
   // Continue loop (recursive call after small delay for steady flow)
@@ -1542,6 +1554,78 @@ async function loadInstancesFromDisk() {
   }
 }
 
+/**
+ * Get queue details for an instance
+ */
+function getQueueDetails(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    throw new Error(`Instance ${instanceId} not found`);
+  }
+  
+  const now = Date.now();
+  const items = instance.queue.map(item => ({
+    id: item.id,
+    type: item.type,
+    idempotencyKey: item.idempotencyKey?.substring(0, 30) + '...',
+    createdAt: item.createdAt,
+    age: now - new Date(item.createdAt).getTime(),
+    attemptCount: item.attemptCount,
+    nextAttemptAt: item.nextAttemptAt,
+    nextAttemptIn: item.nextAttemptAt ? Math.max(0, item.nextAttemptAt - now) : 0,
+    lastError: item.lastError,
+    isEligible: !item.nextAttemptAt || now >= item.nextAttemptAt,
+  }));
+  
+  return {
+    depth: instance.queue.length,
+    sendLoopRunning: instance.sendLoopRunning,
+    instanceState: instance.state,
+    items,
+    eligibleCount: items.filter(i => i.isEligible).length,
+  };
+}
+
+/**
+ * Manually trigger send loop for an instance
+ */
+function triggerSendLoop(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    throw new Error(`Instance ${instanceId} not found`);
+  }
+  
+  console.log(`[${instanceId}] Manual send loop trigger requested (state: ${instance.state}, queue: ${instance.queue.length} items)`);
+  
+  if (instance.state !== InstanceState.READY) {
+    return {
+      success: false,
+      message: `Instance is not READY (state: ${instance.state}). Send loop will start automatically when instance becomes READY.`,
+      state: instance.state,
+      queueDepth: instance.queue.length,
+    };
+  }
+  
+  if (instance.queue.length === 0) {
+    return {
+      success: false,
+      message: 'Queue is empty. Nothing to send.',
+      queueDepth: 0,
+    };
+  }
+  
+  // Force start send loop
+  instance.sendLoopRunning = false; // Reset flag to allow restart
+  startSendLoop(instanceId);
+  
+  return {
+    success: true,
+    message: 'Send loop triggered',
+    queueDepth: instance.queue.length,
+    sendLoopRunning: instance.sendLoopRunning,
+  };
+}
+
 module.exports = {
   InstanceState,
   createInstance,
@@ -1556,4 +1640,6 @@ module.exports = {
   loadInstancesFromDisk,
   saveInstancesToDisk,
   clearQueue,
+  getQueueDetails,
+  triggerSendLoop,
 };

@@ -540,6 +540,27 @@ router.delete('/instances/:id', async (req, res) => {
 });
 
 /**
+ * GET /instances/:id/queue
+ * Get queue details for an instance
+ */
+router.get('/instances/:id/queue', (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const queueDetails = instanceManager.getQueueDetails(instanceId);
+    
+    res.json(createSuccessResponse(queueDetails));
+  } catch (error) {
+    console.error('Error getting queue details:', error);
+    res.status(404).json(createErrorResponse(error.message, 404));
+  }
+});
+
+/**
  * DELETE /instances/:id/queue
  * Clear message/poll queue for an instance
  */
@@ -560,6 +581,31 @@ router.delete('/instances/:id/queue', (req, res) => {
     }));
   } catch (error) {
     console.error('Error clearing queue:', error);
+    res.status(404).json(createErrorResponse(error.message, 404));
+  }
+});
+
+/**
+ * POST /instances/:id/queue/trigger
+ * Manually trigger send loop for an instance
+ */
+router.post('/instances/:id/queue/trigger', (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const result = instanceManager.triggerSendLoop(instanceId);
+    
+    if (result.success) {
+      res.json(createSuccessResponse(result));
+    } else {
+      res.status(400).json(createErrorResponse(result.message, 400));
+    }
+  } catch (error) {
+    console.error('Error triggering send loop:', error);
     res.status(404).json(createErrorResponse(error.message, 404));
   }
 });
