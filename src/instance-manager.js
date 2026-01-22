@@ -402,43 +402,108 @@ async function createClient(instanceId, instanceName) {
   // This matches the old behavior where instances auto-reconnected after restart
   const sanitizedClientId = sanitizeInstanceId(instanceId);
   
+  // Build Puppeteer config with robust args for headless Linux environments
+  const puppeteerConfig = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-breakpad',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-default-apps',
+      '--disable-features=TranslateUI',
+      '--disable-ipc-flooding-protection',
+      '--disable-notifications',
+      '--disable-prompt-on-repost',
+      '--disable-renderer-backgrounding',
+      '--disable-sync',
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--force-color-profile=srgb',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--disable-blink-features=AutomationControlled',
+      // Additional flags for headless Linux environments (fixes xdg-settings and snap issues)
+      '--disable-web-security',
+      '--disable-features=VizDisplayCompositor',
+      '--disable-accelerated-2d-canvas',
+      '--disable-accelerated-video-decode',
+      '--disable-background-downloads',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-features=AudioServiceOutOfProcess',
+      '--disable-hang-monitor',
+      '--disable-popup-blocking',
+      '--disable-speech-api',
+      '--disable-web-resources',
+      '--ignore-certificate-errors',
+      '--ignore-certificate-errors-spki-list',
+      '--ignore-ssl-errors',
+      '--log-level=3', // Suppress non-fatal errors
+      '--no-default-browser-check',
+      '--no-pings',
+      '--use-gl=swiftshader',
+      '--window-size=1920,1080',
+      // Fix for xdg-settings and snap cgroup issues
+      '--disable-x11-autolaunch',
+      '--disable-application-cache',
+      '--disable-plugins-discovery',
+    ],
+  };
+  
+  // Only set executablePath if explicitly configured (avoid snap-installed Chromium issues)
+  // If chromePath is set and exists, use it; otherwise let Puppeteer find Chromium
+  if (config.chromePath && config.chromePath !== '/usr/bin/chromium-browser') {
+    try {
+      await fs.access(config.chromePath);
+      puppeteerConfig.executablePath = config.chromePath;
+      console.log(`[${instanceId}] Using explicit Chrome path: ${config.chromePath}`);
+    } catch (error) {
+      console.warn(`[${instanceId}] Chrome path ${config.chromePath} not accessible, letting Puppeteer find Chromium`);
+    }
+  } else {
+    // Try common Chromium paths, fallback to letting Puppeteer find it
+    const commonPaths = [
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+    ];
+    
+    let foundPath = null;
+    for (const testPath of commonPaths) {
+      try {
+        await fs.access(testPath);
+        foundPath = testPath;
+        break;
+      } catch (error) {
+        // Path doesn't exist, continue
+      }
+    }
+    
+    if (foundPath) {
+      puppeteerConfig.executablePath = foundPath;
+      console.log(`[${instanceId}] Using detected Chrome path: ${foundPath}`);
+    } else {
+      console.log(`[${instanceId}] Letting Puppeteer auto-detect Chromium executable`);
+    }
+  }
+  
   return new Client({
     authStrategy: new LocalAuth({
       clientId: sanitizedClientId,
       // Don't specify dataPath - use LocalAuth default (.wwebjs_auth/session-{clientId}/)
       // This ensures backward compatibility with existing session data
     }),
-    puppeteer: {
-      headless: true,
-      executablePath: config.chromePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-breakpad',
-        '--disable-component-extensions-with-background-pages',
-        '--disable-default-apps',
-        '--disable-features=TranslateUI',
-        '--disable-ipc-flooding-protection',
-        '--disable-notifications',
-        '--disable-prompt-on-repost',
-        '--disable-renderer-backgrounding',
-        '--disable-sync',
-        '--enable-features=NetworkService,NetworkServiceInProcess',
-        '--force-color-profile=srgb',
-        '--hide-scrollbars',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-first-run',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    },
+    puppeteer: puppeteerConfig,
   });
 }
 
