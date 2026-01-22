@@ -867,9 +867,12 @@ async function processQueueItem(instanceId, item) {
   if (instance.state !== InstanceState.READY) {
     // Trigger ensureReady if not terminal
     if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+      console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), triggering ensureReady to reconnect`);
       Promise.resolve(ensureReady(instanceId)).catch(err => {
         console.error(`[${instanceId}] ensureReady failed:`, err);
       });
+    } else {
+      console.log(`[${instanceId}] Cannot process item - instance is in terminal state (${instance.state})`);
     }
     return false; // Cannot process now
   }
@@ -1296,7 +1299,15 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
       console.error(`[${instanceId}] Failed to start send loop:`, err);
     });
   } else {
-    console.log(`[${instanceId}] Send loop will start automatically when instance becomes READY (current state: ${instance.state})`);
+    console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), will attempt to make it ready`);
+    // Trigger ensureReady if not terminal (safety net - sendMessage/sendPoll also do this)
+    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+      Promise.resolve(ensureReady(instanceId)).catch(err => {
+        console.error(`[${instanceId}] ensureReady failed in enqueueItem:`, err);
+      });
+    } else {
+      console.log(`[${instanceId}] Instance is in terminal state (${instance.state}), cannot auto-reconnect`);
+    }
   }
   
   return item;
