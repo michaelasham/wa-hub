@@ -403,14 +403,18 @@ async function createClient(instanceId, instanceName) {
   const sanitizedClientId = sanitizeInstanceId(instanceId);
   
   // Build Puppeteer config with robust args for headless Linux environments
+  // Keep args minimal to avoid conflicts that could cause "Execution context destroyed" errors
   const puppeteerConfig = {
     headless: true,
     args: [
+      // Essential for headless Linux
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-software-rasterizer',
+      
+      // Basic headless optimizations
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-background-timer-throttling',
@@ -424,39 +428,27 @@ async function createClient(instanceId, instanceName) {
       '--disable-prompt-on-repost',
       '--disable-renderer-backgrounding',
       '--disable-sync',
-      '--enable-features=NetworkService,NetworkServiceInProcess',
       '--force-color-profile=srgb',
       '--hide-scrollbars',
       '--metrics-recording-only',
       '--mute-audio',
       '--no-first-run',
       '--disable-blink-features=AutomationControlled',
-      // Additional flags for headless Linux environments (fixes xdg-settings and snap issues)
-      '--disable-web-security',
-      '--disable-features=VizDisplayCompositor',
-      '--disable-accelerated-2d-canvas',
-      '--disable-accelerated-video-decode',
-      '--disable-background-downloads',
-      '--disable-client-side-phishing-detection',
-      '--disable-component-update',
-      '--disable-domain-reliability',
-      '--disable-features=AudioServiceOutOfProcess',
-      '--disable-hang-monitor',
-      '--disable-popup-blocking',
-      '--disable-speech-api',
-      '--disable-web-resources',
-      '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list',
-      '--ignore-ssl-errors',
-      '--log-level=3', // Suppress non-fatal errors
-      '--no-default-browser-check',
-      '--no-pings',
-      '--use-gl=swiftshader',
-      '--window-size=1920,1080',
+      
       // Fix for xdg-settings and snap cgroup issues
       '--disable-x11-autolaunch',
       '--disable-application-cache',
       '--disable-plugins-discovery',
+      
+      // Network and security (minimal set)
+      '--ignore-certificate-errors',
+      '--ignore-certificate-errors-spki-list',
+      '--no-default-browser-check',
+      '--no-pings',
+      
+      // Display
+      '--window-size=1920,1080',
+      '--log-level=3', // Suppress non-fatal errors
     ],
   };
   
@@ -1101,25 +1093,85 @@ async function createInstance(instanceId, name, webhookConfig) {
   const instance = new InstanceContext(instanceId, name, webhookConfig);
   instances.set(instanceId, instance);
   
-  // Create client
-  const client = await createClient(instanceId, name);
-  instance.client = client;
+  // Initialize with retry logic (max 2 attempts)
+  const maxAttempts = 2;
+  let lastError = null;
   
-  // Setup event listeners
-  setupEventListeners(instanceId, client);
-  
-  // Initialize
-  try {
-    instance.transitionTo(InstanceState.CONNECTING, 'initializing');
-    await client.initialize();
-    // Wait for ready or QR
-    await waitForReadyEvent(instanceId).catch(() => {
-      // QR is acceptable, don't throw
-    });
-  } catch (error) {
-    console.error(`[${instanceId}] Failed to initialize:`, error);
-    instance.transitionTo(InstanceState.ERROR, `Initialization failed: ${error.message}`);
-    throw error;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let client = null;
+    
+    try {
+      // Create client
+      client = await createClient(instanceId, name);
+      instance.client = client;
+      
+      // Setup event listeners
+      setupEventListeners(instanceId, client);
+      
+      // Small delay to let browser process stabilize
+      if (attempt > 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+      }
+      
+      // Initialize
+      instance.transitionTo(InstanceState.CONNECTING, `initializing (attempt ${attempt}/${maxAttempts})`);
+      console.log(`[${instanceId}] Initializing client (attempt ${attempt}/${maxAttempts})...`);
+      
+      await client.initialize();
+      
+      // Wait for ready or QR (with timeout)
+      const readyTimeout = 30000; // 30 seconds to get QR or ready
+      await Promise.race([
+        waitForReadyEvent(instanceId).catch(() => {
+          // QR is acceptable, don't throw
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Initialization timeout - no QR or ready event')), readyTimeout)
+        ),
+      ]).catch((timeoutError) => {
+        // If we get a QR event, that's fine - don't treat timeout as fatal
+        if (instance.qrCode) {
+          console.log(`[${instanceId}] QR code received, initialization proceeding...`);
+          return;
+        }
+        throw timeoutError;
+      });
+      
+      // Success - break out of retry loop
+      console.log(`[${instanceId}] Client initialized successfully`);
+      break;
+      
+    } catch (error) {
+      lastError = error;
+      console.error(`[${instanceId}] Initialization attempt ${attempt}/${maxAttempts} failed:`, error.message);
+      
+      // Clean up failed client
+      if (client) {
+        try {
+          // Remove event listeners to prevent leaks
+          if (client.pupPage) {
+            client.pupPage.removeAllListeners();
+          }
+          if (client.pupBrowser) {
+            await client.pupBrowser.close().catch(() => {});
+          }
+        } catch (cleanupError) {
+          console.warn(`[${instanceId}] Error during cleanup:`, cleanupError.message);
+        }
+        instance.client = null;
+      }
+      
+      // If this was the last attempt, throw the error
+      if (attempt === maxAttempts) {
+        instance.transitionTo(InstanceState.ERROR, `Initialization failed after ${maxAttempts} attempts: ${error.message}`);
+        throw new Error(`Failed to initialize after ${maxAttempts} attempts: ${error.message}`);
+      }
+      
+      // Wait before retry (exponential backoff)
+      const backoffMs = 2000 * attempt;
+      console.log(`[${instanceId}] Retrying in ${backoffMs}ms...`);
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
   }
   
   // Save to disk
