@@ -1233,9 +1233,23 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
     throw new Error(`Message already sent (idempotency key: ${idempotencyKey})`);
   }
   
+  // Check if already queued
   const isQueued = await idempotencyStore.isQueued(idempotencyKey);
   if (isQueued) {
-    throw new Error(`Message already queued (idempotency key: ${idempotencyKey})`);
+    // Check if item is still in the actual queue
+    const existingItem = instance.queue.find(item => item.idempotencyKey === idempotencyKey);
+    if (existingItem) {
+      // Item is still in queue - return it instead of throwing error
+      console.log(`[${instanceId}] Message already queued (idempotency: ${idempotencyKey.substring(0, 20)}...), returning existing queue item`);
+      return existingItem;
+    }
+    
+    // Item is marked as queued in idempotency store but not in actual queue
+    // This could happen if queue was cleared or item was removed but idempotency record wasn't updated
+    // Since isQueued already checks for staleness, if it returns true, the item is not stale
+    // But if it's not in the queue, we should allow re-queuing (queue might have been cleared)
+    console.warn(`[${instanceId}] Item marked as queued but not in actual queue, allowing re-queue (idempotency: ${idempotencyKey.substring(0, 20)}...)`);
+    // Continue to queue new item (will update idempotency record)
   }
   
   const itemId = crypto.randomBytes(16).toString('hex');
@@ -1306,8 +1320,12 @@ async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
   // Enqueue for steady drain (no immediate send to prevent bursts)
   const item = await enqueueItem(instanceId, 'message', { chatId, message }, idempotencyKey);
   
-  // Trigger reconnection if not terminal
-  if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+  // Check if this was an existing queued item (item created more than 2 seconds ago = existing)
+  const itemAge = Date.now() - new Date(item.createdAt).getTime();
+  const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
+  
+  // Trigger reconnection if not terminal (only if newly queued)
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
@@ -1319,6 +1337,7 @@ async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
     queueDepth: instance.queue.length,
     queueId: item.id,
     idempotencyKey: idempotencyKey.substring(0, 30) + '...', // Truncated for response
+    alreadyQueued: wasAlreadyQueued, // Indicate if this was already queued
   };
 }
 
@@ -1352,8 +1371,12 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, i
   // Enqueue for steady drain (no immediate send to prevent bursts)
   const item = await enqueueItem(instanceId, 'poll', { chatId, caption, options, multipleAnswers }, idempotencyKey);
   
-  // Trigger reconnection if not terminal
-  if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+  // Check if this was an existing queued item (item created more than 2 seconds ago = existing)
+  const itemAge = Date.now() - new Date(item.createdAt).getTime();
+  const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
+  
+  // Trigger reconnection if not terminal (only if newly queued)
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
@@ -1365,6 +1388,7 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, i
     queueDepth: instance.queue.length,
     queueId: item.id,
     idempotencyKey: idempotencyKey.substring(0, 30) + '...', // Truncated for response
+    alreadyQueued: wasAlreadyQueued, // Indicate if this was already queued
   };
 }
 
