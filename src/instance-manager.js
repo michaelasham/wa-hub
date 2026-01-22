@@ -121,8 +121,11 @@ class InstanceContext {
           this.readyTimeout = null;
         }
       }
-      // Start send loop when ready
-      startSendLoop(this.id);
+      // Start send loop when ready (if queue has items)
+      if (this.queue.length > 0) {
+        console.log(`[${this.id}] Instance READY with ${this.queue.length} queued items - starting send loop`);
+        startSendLoop(this.id);
+      }
     } else if (newState === InstanceState.DISCONNECTED) {
       this.lastDisconnectAt = new Date();
       // Stop send loop
@@ -983,6 +986,9 @@ async function runSendLoop(instanceId) {
   // Only run if READY and queue has items
   if (instance.state !== InstanceState.READY || instance.queue.length === 0) {
     instance.sendLoopRunning = false;
+    if (instance.queue.length > 0) {
+      console.log(`[${instanceId}] runSendLoop: Stopped (state: ${instance.state}, queue: ${instance.queue.length} items)`);
+    }
     return;
   }
   
@@ -995,6 +1001,7 @@ async function runSendLoop(instanceId) {
   if (itemsToProcess.length === 0) {
     // All items are deferred - wait a bit before checking again
     instance.sendLoopRunning = false;
+    console.log(`[${instanceId}] runSendLoop: All ${instance.queue.length} items deferred, will retry in 1s`);
     setTimeout(() => {
       startSendLoop(instanceId);
     }, 1000); // Check again in 1 second
@@ -1003,6 +1010,7 @@ async function runSendLoop(instanceId) {
   
   // Process first eligible item
   const item = itemsToProcess[0];
+  console.log(`[${instanceId}] runSendLoop: Processing item ${item.id} (${item.type}), ${itemsToProcess.length} eligible, ${instance.queue.length} total in queue`);
   const shouldRemove = await processQueueItem(instanceId, item);
   
   if (shouldRemove) {
@@ -1026,24 +1034,29 @@ async function runSendLoop(instanceId) {
 function startSendLoop(instanceId) {
   const instance = instances.get(instanceId);
   if (!instance) {
+    console.warn(`[${instanceId}] startSendLoop: Instance not found`);
     return;
   }
   
   // Only start if READY and not already running
   if (instance.state !== InstanceState.READY) {
     instance.sendLoopRunning = false;
+    console.log(`[${instanceId}] startSendLoop: Instance not READY (state: ${instance.state}), queue depth: ${instance.queue.length}`);
     return;
   }
   
   if (instance.sendLoopRunning) {
+    console.log(`[${instanceId}] startSendLoop: Already running, queue depth: ${instance.queue.length}`);
     return; // Already running
   }
   
   if (instance.queue.length === 0) {
     instance.sendLoopRunning = false;
+    console.log(`[${instanceId}] startSendLoop: Queue empty`);
     return; // Nothing to process
   }
   
+  console.log(`[${instanceId}] Starting send loop with ${instance.queue.length} items in queue`);
   instance.sendLoopRunning = true;
   runSendLoop(instanceId).catch(err => {
     console.error(`[${instanceId}] Send loop error:`, err);
@@ -1248,12 +1261,17 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
     status: 'QUEUED',
   });
   
-  console.log(`[${instanceId}] Queued ${type} (idempotency: ${idempotencyKey.substring(0, 20)}..., queue depth: ${instance.queue.length})`);
+  console.log(`[${instanceId}] Queued ${type} (idempotency: ${idempotencyKey.substring(0, 20)}..., queue depth: ${instance.queue.length}, state: ${instance.state})`);
   
   // Trigger send loop if not running
-  Promise.resolve(startSendLoop(instanceId)).catch(err => {
-    console.error(`[${instanceId}] Failed to start send loop:`, err);
-  });
+  // Note: send loop will only start if instance is READY
+  if (instance.state === InstanceState.READY) {
+    Promise.resolve(startSendLoop(instanceId)).catch(err => {
+      console.error(`[${instanceId}] Failed to start send loop:`, err);
+    });
+  } else {
+    console.log(`[${instanceId}] Send loop will start automatically when instance becomes READY (current state: ${instance.state})`);
+  }
   
   return item;
 }
