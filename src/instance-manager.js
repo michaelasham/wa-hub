@@ -13,6 +13,19 @@ const { qrToBase64, extractPhoneNumber, sanitizeInstanceId } = require('./utils'
 const idempotencyStore = require('./idempotency-store');
 const { withTypingIndicator } = require('./utils/typingIndicator');
 
+/**
+ * Debug patch: structured JSON log for debugging disconnect/ready delays
+ */
+function debugLog(instanceId, event, data = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    instanceId,
+    event,
+    ...data,
+  };
+  console.log(JSON.stringify(entry));
+}
+
 // State machine enum
 const InstanceState = {
   READY: 'ready',
@@ -94,6 +107,12 @@ class InstanceContext {
       ? webhookConfig.typingIndicatorEnabled 
       : config.typingIndicatorEnabledDefault;
     this.applyTypingTo = webhookConfig.applyTypingTo || ['customer']; // ['customer'] or ['customer', 'merchant']
+
+    // Debug patch: watchdog for ready_timeout
+    this.readyWatchdogTimer = null;
+    this.readyWatchdogStartAt = null;
+    this.readyWatchdogRestarted = false; // Only restart once on timeout
+    this.authenticatedAt = null; // For measuring authenticated -> ready duration
   }
   
   /**
@@ -103,7 +122,8 @@ class InstanceContext {
     const oldState = this.state;
     this.state = newState;
     this.lastEvent = newState;
-    
+
+    debugLog(this.id, 'state_transition', { from: oldState, to: newState, reason: reason || undefined });
     console.log(`[${this.id}] State transition: ${oldState} -> ${newState}${reason ? ` (${reason})` : ''}`);
     
     // Handle state-specific actions
@@ -111,6 +131,12 @@ class InstanceContext {
       this.lastReadyAt = new Date();
       this.restartAttempts = 0; // Reset on successful ready
       this.restartHistory = []; // Clear restart history
+      // Debug patch: cancel watchdog, log authenticated->ready duration
+      this.clearReadyWatchdog();
+      if (this.authenticatedAt) {
+        const ms = this.lastReadyAt - this.authenticatedAt;
+        debugLog(this.id, 'ready_after_authenticated_ms', { ms, authenticatedAt: this.authenticatedAt.toISOString() });
+      }
       // Resolve ready promise if waiting
       if (this.readyResolver) {
         this.readyResolver();
@@ -262,6 +288,29 @@ class InstanceContext {
   }
   
   /**
+   * Debug patch: clear ready watchdog timer
+   */
+  clearReadyWatchdog() {
+    if (this.readyWatchdogTimer) {
+      clearTimeout(this.readyWatchdogTimer);
+      this.readyWatchdogTimer = null;
+    }
+    this.readyWatchdogStartAt = null;
+  }
+
+  /**
+   * Debug patch: start ready watchdog (call on qr/authenticated)
+   */
+  startReadyWatchdog() {
+    this.clearReadyWatchdog();
+    this.readyWatchdogStartAt = new Date();
+    this.readyWatchdogTimer = setTimeout(() => {
+      this.readyWatchdogTimer = null;
+      onReadyWatchdogTimeout(this.id);
+    }, config.readyWatchdogMs);
+  }
+
+  /**
    * Get next allowed send time (for rate limiting)
    */
   getNextAllowedSendTime() {
@@ -285,15 +334,55 @@ class InstanceContext {
 const instances = new Map();
 
 /**
+ * Debug patch: called when ready watchdog fires (ready not received within timeout)
+ */
+async function onReadyWatchdogTimeout(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance || instance.state === InstanceState.READY) return;
+
+  const elapsedMs = instance.readyWatchdogStartAt ? Date.now() - instance.readyWatchdogStartAt.getTime() : 0;
+  debugLog(instanceId, 'ready_timeout', {
+    elapsedMs,
+    authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+    state: instance.state,
+  });
+  console.error(`[${instanceId}] ready_timeout: ready event not fired after ${elapsedMs}ms`);
+  await forwardWebhook(instanceId, 'ready_timeout', {
+    elapsedMs,
+    authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+    state: instance.state,
+  });
+
+  if (!instance.readyWatchdogRestarted) {
+    instance.readyWatchdogRestarted = true;
+    instance.clearReadyWatchdog();
+    console.log(`[${instanceId}] ready_timeout: restarting client once`);
+    try {
+      if (instance.client) {
+        await softRestartAndWaitReady(instanceId).catch(err => {
+          console.error(`[${instanceId}] ready_timeout restart failed:`, err.message);
+        });
+      }
+    } catch (err) {
+      console.error(`[${instanceId}] ready_timeout restart error:`, err);
+    }
+  }
+}
+
+/**
  * Forward webhook event
+ * Debug patch: authenticated and ready are always sent (included by default unless explicitly excluded)
  */
 async function forwardWebhook(instanceId, event, data) {
   const instance = instances.get(instanceId);
   if (!instance || !instance.webhookUrl) return;
-  
-  if (instance.webhookEvents.length > 0 && !instance.webhookEvents.includes(event)) {
-    return;
-  }
+
+  // authenticated and ready always forwarded; other events follow webhookEvents filter
+  const alwaysSend = ['authenticated', 'ready', 'ready_timeout'];
+  const shouldSend = alwaysSend.includes(event) ||
+    instance.webhookEvents.length === 0 ||
+    instance.webhookEvents.includes(event);
+  if (!shouldSend) return;
   
   const payload = { event, instanceId, data };
   
@@ -515,15 +604,16 @@ function setupEventListeners(instanceId, client) {
   
   // QR code event
   client.on('qr', async (qr) => {
+    debugLog(instanceId, 'qr', {});
     console.log(`[${instanceId}] Event: qr`);
     instance.qrReceivedDuringRestart = true;
-    
+    instance.readyWatchdogRestarted = false; // Reset so each QR scan gets one timeout restart
+    instance.startReadyWatchdog();
     try {
       const qrBase64 = await qrToBase64(qr);
       instance.qrCode = qrBase64;
       instance.lastQrUpdate = new Date();
       instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
-      
       await forwardWebhook(instanceId, 'qr', { qr: qrBase64 });
     } catch (error) {
       console.error(`[${instanceId}] Error processing QR:`, error);
@@ -532,16 +622,22 @@ function setupEventListeners(instanceId, client) {
   
   // Authenticated event
   client.on('authenticated', () => {
+    instance.authenticatedAt = new Date();
+    debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
     console.log(`[${instanceId}] Event: authenticated`);
     instance.lastEvent = 'authenticated';
+    instance.startReadyWatchdog(); // Restart watchdog: ready expected within timeout
     forwardWebhook(instanceId, 'authenticated', {});
   });
   
   // Ready event
   client.on('ready', async () => {
+    debugLog(instanceId, 'ready', {
+      authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+      authenticatedToReadyMs: instance.authenticatedAt ? Date.now() - instance.authenticatedAt.getTime() : null,
+    });
     console.log(`[${instanceId}] Event: ready`);
     instance.lastEvent = 'ready';
-    
     try {
       const info = client.info;
       if (info) {
@@ -551,7 +647,6 @@ function setupEventListeners(instanceId, client) {
     } catch (error) {
       console.error(`[${instanceId}] Error getting client info:`, error);
     }
-    
     instance.transitionTo(InstanceState.READY);
     await forwardWebhook(instanceId, 'ready', { status: 'ready' });
     
@@ -561,41 +656,42 @@ function setupEventListeners(instanceId, client) {
   
   // Auth failure
   client.on('auth_failure', (msg) => {
+    debugLog(instanceId, 'auth_failure', { error: String(msg) });
     console.error(`[${instanceId}] Event: auth_failure - ${msg}`);
     instance.lastAuthFailureAt = new Date();
+    instance.clearReadyWatchdog();
     instance.transitionTo(InstanceState.NEEDS_QR, `Auth failure: ${msg}`);
     forwardWebhook(instanceId, 'auth_failure', { message: msg });
   });
   
   // Disconnected
   client.on('disconnected', (reason) => {
-    console.log(`[${instanceId}] Event: disconnected - ${reason}`);
+    const reasonStr = reason || 'unknown';
+    debugLog(instanceId, 'disconnected', { reason: reasonStr });
+    console.log(`[${instanceId}] Event: disconnected - ${reasonStr}`);
     instance.lastDisconnectAt = new Date();
-    instance.lastDisconnectReason = reason || 'unknown';
+    instance.lastDisconnectReason = reasonStr;
     instance.lastEvent = 'disconnected';
     instance.recordDisconnect();
-    
-    // Stop send loop
+    instance.clearReadyWatchdog();
     stopSendLoop(instanceId);
-    
-    // Check if terminal disconnect reason
     const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
-    const reasonUpper = (reason || '').toUpperCase();
+    const reasonUpper = reasonStr.toUpperCase();
     const isTerminal = terminalReasons.some(term => reasonUpper.includes(term));
-    
     if (isTerminal) {
-      instance.transitionTo(InstanceState.NEEDS_QR, `Terminal disconnect: ${reason}`);
+      instance.transitionTo(InstanceState.NEEDS_QR, `Terminal disconnect: ${reasonStr}`);
     } else {
-      instance.transitionTo(InstanceState.DISCONNECTED, reason);
-      // Auto-reconnect on non-terminal disconnect (with throttling)
-      if (!instance.reconnectionLock && !instance.checkRestartRateLimit()) {
+      instance.transitionTo(InstanceState.DISCONNECTED, reasonStr);
+      // Auto-reconnect on non-terminal disconnect (skip if DISABLE_AUTO_RECONNECT)
+      if (!config.disableAutoReconnect && !instance.reconnectionLock && !instance.checkRestartRateLimit()) {
         Promise.resolve(ensureReady(instanceId)).catch(err => {
           console.error(`[${instanceId}] Auto-reconnect failed:`, err);
         });
+      } else if (config.disableAutoReconnect) {
+        console.log(`[${instanceId}] Auto-reconnect disabled (DISABLE_AUTO_RECONNECT=true)`);
       }
     }
-    
-    forwardWebhook(instanceId, 'disconnected', { reason: reason || 'unknown' });
+    forwardWebhook(instanceId, 'disconnected', { reason: reasonStr });
   });
   
   // State change
@@ -1641,11 +1737,16 @@ function triggerSendLoop(instanceId) {
   };
 }
 
+function getInstanceCount() {
+  return instances.size;
+}
+
 module.exports = {
   InstanceState,
   createInstance,
   getInstance,
   getAllInstances,
+  getInstanceCount,
   deleteInstance,
   updateWebhookConfig,
   sendMessage,

@@ -79,6 +79,20 @@ const port = config.port;
     // Continue startup even if restoration fails
   }
 
+  // Debug patch: process restart visibility
+  const instanceCount = instanceManager.getInstanceCount ? instanceManager.getInstanceCount() : 0;
+  const startInfo = {
+    ts: new Date().toISOString(),
+    event: 'process_start',
+    pid: process.pid,
+    memoryLimit: process.env.PM2_MAX_MEMORY_RESTART || process.env.NODE_OPTIONS?.match(/max-old-space-size=(\d+)/)?.[1] || 'not set',
+    instanceCount,
+    pm2Instances: process.env.PM2_INSTANCES || '1',
+    execMode: process.env.PM2_PROCESS_ID !== undefined ? 'pm2' : 'direct',
+  };
+  console.log(JSON.stringify(startInfo));
+  console.log(`[Startup] Process pid=${process.pid} instanceCount=${instanceCount} (PM2 instances=${startInfo.pm2Instances}, exec_mode=fork - single worker)`);
+
   const server = app.listen(port, () => {
     console.log(`wa-hub service started on port ${port}`);
     console.log(`Health check: http://localhost:${port}/health`);

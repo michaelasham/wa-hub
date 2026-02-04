@@ -58,6 +58,12 @@ const config = {
   
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',
+
+  // Debug patch: disable auto-reconnect to isolate disconnect causes
+  disableAutoReconnect: process.env.DISABLE_AUTO_RECONNECT === 'true',
+
+  // Debug patch: watchdog timeout for ready event (ms) - emit ready_timeout if not ready within this
+  readyWatchdogMs: parseInt(process.env.READY_WATCHDOG_MS || '180000', 10), // 180s default
 };
 
 // No default webhook URL - each instance must specify its own webhook URL
