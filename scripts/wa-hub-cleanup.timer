@@ -1,0 +1,15 @@
+[Unit]
+Description=WA-Hub Cache Cleanup Timer (Daily at 04:30)
+Documentation=https://github.com/your-org/wa-hub
+Requires=wa-hub-cleanup.service
+
+[Timer]
+# Run daily at 04:30 local time
+OnCalendar=*-*-* 04:30:00
+# If the system was off during the scheduled time, run immediately on boot
+Persistent=true
+# Add some randomization to avoid thundering herd (0-30 minutes)
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=WA-Hub Cache Cleanup Service
+Documentation=https://github.com/your-org/wa-hub
+After=network.target
+
+[Service]
+Type=oneshot
+# IMPORTANT: Update User and paths below to match your deployment
+# User should be the user running wa-hub (or root if running as root)
+User=root
+# WorkingDirectory should point to your wa-hub project root
+WorkingDirectory=/home/michaelnasser321/wa-hub
+# WA_HUB_TENANTS_DIR should point to your .wwebjs_auth directory (or AUTH_BASE_DIR)
+# Leave empty to use default from config.js
+Environment="WA_HUB_TENANTS_DIR="
+Environment="LOG_FILE=/var/log/wa-hub-cleanup.log"
+# Update ExecStart path to match your deployment location
+ExecStart=/bin/bash /home/michaelnasser321/wa-hub/scripts/wa-hub-cleanup.sh
+StandardOutput=journal
+StandardError=journal
+
+# Safety: prevent accidental huge deletions (adjust as needed)
+Environment="MAX_DELETE_GB=100"
+
+[Install]
+WantedBy=multi-user.target

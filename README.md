@@ -459,6 +459,224 @@ All typing indicator activity is logged with structured format:
 [instanceName] [Typing] Skipped: chat_not_found (chatId: ***4599)
 ```
 
+## Disk Cleanup & Storage Management
+
+WA-Hub uses Chromium/Puppeteer for each WhatsApp instance, which can accumulate significant cache data over time. To prevent disk storage from growing indefinitely, automated cleanup tools are provided.
+
+### Quick Start
+
+**1. Check current disk usage:**
+```bash
+node scripts/report-disk-usage.js
+```
+
+**2. Preview cleanup (dry run):**
+```bash
+DRY_RUN=1 ./scripts/wa-hub-cleanup.sh
+```
+
+**3. Run cleanup manually:**
+```bash
+./scripts/wa-hub-cleanup.sh
+```
+
+### Disk Usage Report
+
+The `report-disk-usage.js` script provides detailed disk usage analysis:
+
+```bash
+# Human-readable report
+node scripts/report-disk-usage.js
+
+# JSON output (for automation)
+node scripts/report-disk-usage.js --json
+```
+
+**Output includes:**
+- Per-tenant directory sizes (sorted by size)
+- Chromium profile directories (Default, Profile 1, etc.)
+- Cache directory breakdown (Cache, Code Cache, GPUCache, etc.)
+- Total storage usage
+
+**Example output:**
+```
+Tenant: WASP-shop_myshopify_com
+  Total Size: 2.5 GB
+  Profiles:
+    Default: 2.3 GB (cache: 1.8 GB)
+      - Cache: 800 MB
+      - Code Cache: 600 MB
+      - GPUCache: 400 MB
+```
+
+### Automated Cleanup Script
+
+The `wa-hub-cleanup.sh` script safely removes Chromium cache directories while preserving authentication data.
+
+**Safety Features:**
+- ✅ Stops service before cleanup (prevents corruption)
+- ✅ Only deletes cache directories (never auth/session data)
+- ✅ DRY_RUN mode for preview
+- ✅ MAX_DELETE_GB guard (prevents accidental huge deletions)
+- ✅ Detailed logging
+
+**What Gets Deleted:**
+- `Default/Cache`
+- `Default/Code Cache`
+- `Default/GPUCache`
+- `Default/Service Worker/CacheStorage`
+- `Default/Service Worker/ScriptCache`
+- `Default/Media Cache`
+- `Default/ShaderCache`
+- Similar directories in `Profile 1`, `Profile 2`, etc.
+
+**What Never Gets Deleted:**
+- `.wwebjs_auth/` (authentication data)
+- `.wwebjs_cache/` (session cache - may contain important data)
+- `Local Storage`, `IndexedDB`, `Session Storage` (browser data)
+
+**Usage:**
+```bash
+# Preview what would be deleted
+DRY_RUN=1 ./scripts/wa-hub-cleanup.sh
+
+# Run cleanup (default: max 100GB per run)
+./scripts/wa-hub-cleanup.sh
+
+# Custom max deletion limit
+MAX_DELETE_GB=50 ./scripts/wa-hub-cleanup.sh
+
+# Custom tenants directory
+WA_HUB_TENANTS_DIR=/custom/path/.wwebjs_auth ./scripts/wa-hub-cleanup.sh
+```
+
+### Scheduled Cleanup (systemd Timer)
+
+**1. Install systemd service and timer:**
+
+```bash
+# Update paths in scripts/wa-hub-cleanup.service first!
+# Edit: User, WorkingDirectory, ExecStart paths
+
+# Copy service file
+sudo cp scripts/wa-hub-cleanup.service /etc/systemd/system/
+
+# Copy timer file
+sudo cp scripts/wa-hub-cleanup.timer /etc/systemd/system/
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable and start timer
+sudo systemctl enable wa-hub-cleanup.timer
+sudo systemctl start wa-hub-cleanup.timer
+
+# Check timer status
+sudo systemctl status wa-hub-cleanup.timer
+
+# View next run time
+sudo systemctl list-timers wa-hub-cleanup.timer
+```
+
+**2. Configure logrotate:**
+
+```bash
+# Copy logrotate config
+sudo cp scripts/wa-hub-cleanup.logrotate /etc/logrotate.d/wa-hub-cleanup
+
+# Test logrotate config
+sudo logrotate -d /etc/logrotate.d/wa-hub-cleanup
+```
+
+**Timer Schedule:**
+- Runs daily at 04:30 local time
+- Randomized delay: 0-30 minutes (prevents thundering herd)
+- Persistent: runs immediately on boot if missed
+
+### Scheduled Cleanup (Cron - Alternative)
+
+If systemd is not available, use cron:
+
+```bash
+# Edit root crontab
+sudo crontab -e
+
+# Add this line (runs daily at 04:30):
+30 4 * * * /bin/bash /path/to/wa-hub/scripts/wa-hub-cleanup.sh >> /var/log/wa-hub-cleanup.log 2>&1
+```
+
+### Preventive Measures
+
+**Chromium Cache Size Limits:**
+
+Cache size limits are automatically applied via Puppeteer launch arguments:
+- `--disk-cache-size=104857600` (100MB disk cache)
+- `--media-cache-size=104857600` (100MB media cache)
+
+These limits are set in `src/instance-manager.js` and help prevent cache growth.
+
+### Verification Checklist
+
+After setup, verify everything works:
+
+```bash
+# 1. Check disk usage report
+node scripts/report-disk-usage.js
+
+# 2. Test dry run
+DRY_RUN=1 ./scripts/wa-hub-cleanup.sh
+
+# 3. Check systemd timer (if using systemd)
+sudo systemctl status wa-hub-cleanup.timer
+sudo systemctl list-timers wa-hub-cleanup.timer
+
+# 4. Check logs
+sudo tail -f /var/log/wa-hub-cleanup.log
+
+# 5. Manually trigger cleanup (if needed)
+sudo systemctl start wa-hub-cleanup.service
+```
+
+### Troubleshooting
+
+**Cleanup script fails to stop service:**
+- Check if service name matches (`wa-hub` for PM2, `wa-hub.service` for systemd)
+- Verify service is running: `pm2 list` or `systemctl status wa-hub.service`
+
+**"Tenants directory does not exist" error:**
+- Set `WA_HUB_TENANTS_DIR` environment variable to your `.wwebjs_auth` path
+- Or update the path in `scripts/wa-hub-cleanup.service`
+
+**Service doesn't restart after cleanup:**
+- Check logs: `sudo journalctl -u wa-hub-cleanup.service`
+- Verify service name in cleanup script matches your deployment
+
+**Disk usage still growing:**
+- Verify cache size limits are applied (check Puppeteer args in logs)
+- Run cleanup more frequently (adjust timer schedule)
+- Check for other sources of disk usage (logs, temp files, etc.)
+
+### Rollback
+
+If cleanup causes issues:
+
+1. **Stop automated cleanup:**
+   ```bash
+   sudo systemctl stop wa-hub-cleanup.timer
+   sudo systemctl disable wa-hub-cleanup.timer
+   ```
+
+2. **Restore from backup** (if you have one):
+   ```bash
+   # Restore .wwebjs_auth directory from backup
+   ```
+
+3. **Re-authenticate instances** (if auth data was corrupted - should not happen):
+   - Instances will require QR code scan again
+   - Use `GET /instances/:id/qr` to get new QR codes
+
+**Note:** Cleanup should never delete auth data. If instances require re-authentication after cleanup, it's likely a different issue (check logs).
+
 ## Project Structure
 
 ```

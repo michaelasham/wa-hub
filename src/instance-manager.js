@@ -452,6 +452,10 @@ async function createClient(instanceId, instanceName) {
       // Display
       '--window-size=1920,1080',
       '--log-level=3', // Suppress non-fatal errors
+      
+      // Cache size limits (prevent disk bloat)
+      '--disk-cache-size=104857600', // 100MB disk cache limit
+      '--media-cache-size=104857600', // 100MB media cache limit (if supported)
     ],
   };
   
