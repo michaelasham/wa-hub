@@ -548,41 +548,32 @@ async function createClient(instanceId, instanceName) {
     ],
   };
   
-  // Only set executablePath if explicitly configured (avoid snap-installed Chromium issues)
-  // If chromePath is set and exists, use it; otherwise let Puppeteer find Chromium
-  if (config.chromePath && config.chromePath !== '/usr/bin/chromium-browser') {
+  // Use system Chromium when CHROME_PATH is set and exists (avoids Puppeteer bundled Chromium)
+  // Bundled Chromium can cause 99% CPU renderer hangs on WhatsApp Web load
+  const pathsToTry = config.chromePath
+    ? [config.chromePath]
+    : [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/snap/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+      ];
+  let foundPath = null;
+  for (const testPath of pathsToTry) {
     try {
-      await fs.access(config.chromePath);
-      puppeteerConfig.executablePath = config.chromePath;
-      console.log(`[${instanceId}] Using explicit Chrome path: ${config.chromePath}`);
+      await fs.access(testPath);
+      foundPath = testPath;
+      break;
     } catch (error) {
-      console.warn(`[${instanceId}] Chrome path ${config.chromePath} not accessible, letting Puppeteer find Chromium`);
+      continue;
     }
+  }
+  if (foundPath) {
+    puppeteerConfig.executablePath = foundPath;
+    console.log(`[${instanceId}] Using Chrome: ${foundPath}`);
   } else {
-    // Try common Chromium paths, fallback to letting Puppeteer find it
-    const commonPaths = [
-      '/usr/bin/chromium',
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-    ];
-    
-    let foundPath = null;
-    for (const testPath of commonPaths) {
-      try {
-        await fs.access(testPath);
-        foundPath = testPath;
-        break;
-      } catch (error) {
-        // Path doesn't exist, continue
-      }
-    }
-    
-    if (foundPath) {
-      puppeteerConfig.executablePath = foundPath;
-      console.log(`[${instanceId}] Using detected Chrome path: ${foundPath}`);
-    } else {
-      console.log(`[${instanceId}] Letting Puppeteer auto-detect Chromium executable`);
-    }
+    console.log(`[${instanceId}] No system Chrome found, using Puppeteer bundled Chromium`);
   }
   
   return new Client({
