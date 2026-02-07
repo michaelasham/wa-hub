@@ -39,6 +39,9 @@ const config = {
   // Soft/Hard restart timeouts
   softRestartTimeoutMs: parseInt(process.env.SOFT_RESTART_TIMEOUT_MS || '180000', 10), // 3 minutes
   hardRestartTimeoutMs: parseInt(process.env.HARD_RESTART_TIMEOUT_MS || '180000', 10), // 3 minutes
+
+  // CreateInstance: time to get QR or ready on first init (slow VMs need 60-120s)
+  initTimeoutMs: parseInt(process.env.INIT_TIMEOUT_MS || '120000', 10), // 2 minutes default
   
   // Rate limiting (per instance)
   maxSendsPerMinute: parseInt(process.env.MAX_SENDS_PER_MINUTE_PER_INSTANCE || '6', 10),

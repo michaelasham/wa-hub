@@ -1383,7 +1383,8 @@ async function createInstance(instanceId, name, webhookConfig) {
       await client.initialize();
       
       // Wait for ready or QR (with timeout)
-      const readyTimeout = 30000; // 30 seconds to get QR or ready
+      // On slow VMs, authenticated can take 20-30s; ready can take another 30-60s
+      const readyTimeout = config.initTimeoutMs;
       await Promise.race([
         waitForReadyEvent(instanceId).catch(() => {
           // QR is acceptable, don't throw
