@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { checkPassword, isAuthEnabled, createSession, setSessionCookie } from '@/lib/auth';
+import { checkPassword, isAuthEnabled, createSession, setSessionCookieOnResponse } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
   if (!isAuthEnabled()) {
@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
   }
 
   const token = await createSession();
-  await setSessionCookie(token);
-
-  return NextResponse.json({ ok: true });
+  const res = NextResponse.json({ ok: true });
+  setSessionCookieOnResponse(res, token);
+  return res;
 }

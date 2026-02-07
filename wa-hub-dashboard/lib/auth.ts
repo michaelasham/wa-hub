@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 
 const COOKIE_NAME = 'wa-hub-dashboard-session';
@@ -60,18 +61,27 @@ export async function validateSession(): Promise<boolean> {
   }
 }
 
-export async function setSessionCookie(token: string): Promise<void> {
-  const cookieStore = await cookies();
+function getCookieOptions(): { httpOnly: boolean; secure: boolean; sameSite: 'lax'; maxAge: number; path: string } {
   const secure =
     process.env.DASHBOARD_SECURE_COOKIES === 'true' ||
     (process.env.DASHBOARD_SECURE_COOKIES !== 'false' && process.env.NODE_ENV === 'production');
-  cookieStore.set(COOKIE_NAME, token, {
+  return {
     httpOnly: true,
     secure,
     sameSite: 'lax',
     maxAge: SESSION_MAX_AGE,
     path: '/',
-  });
+  };
+}
+
+export async function setSessionCookie(token: string): Promise<void> {
+  const cookieStore = await cookies();
+  cookieStore.set(COOKIE_NAME, token, getCookieOptions());
+}
+
+/** Set session cookie directly on a NextResponse - more reliable in Route Handlers */
+export function setSessionCookieOnResponse(res: NextResponse, token: string): void {
+  res.cookies.set(COOKIE_NAME, token, getCookieOptions());
 }
 
 export async function clearSessionCookie(): Promise<void> {
