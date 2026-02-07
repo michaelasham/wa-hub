@@ -611,6 +611,30 @@ router.post('/instances/:id/queue/trigger', (req, res) => {
 });
 
 /**
+ * GET /instances/:id/diagnostics
+ * Get per-instance diagnostic info (for debugging stuck NEEDS_QR/CONNECTING)
+ */
+router.get('/instances/:id/diagnostics', (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const diagnostics = instanceManager.getInstanceDiagnostics(instanceId);
+    if (!diagnostics) {
+      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
+    }
+
+    res.json(createSuccessResponse(diagnostics));
+  } catch (error) {
+    console.error('Error getting diagnostics:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
  * POST /instances/:id/client/action/logout
  * Logout instance - destroys the instance completely (same as DELETE)
  * This logs out from WhatsApp, destroys the client, and removes the instance from memory

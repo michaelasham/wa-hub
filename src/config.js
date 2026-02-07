@@ -64,6 +64,9 @@ const config = {
 
   // Debug patch: watchdog timeout for ready event (ms) - emit ready_timeout if not ready within this
   readyWatchdogMs: parseInt(process.env.READY_WATCHDOG_MS || '180000', 10), // 180s default
+
+  // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
+  connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
 };
 
 // No default webhook URL - each instance must specify its own webhook URL

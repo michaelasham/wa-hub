@@ -113,6 +113,21 @@ class InstanceContext {
     this.readyWatchdogStartAt = null;
     this.readyWatchdogRestarted = false; // Only restart once on timeout
     this.authenticatedAt = null; // For measuring authenticated -> ready duration
+
+    // Diagnostic: last webhook delivery
+    this.lastWebhookEvent = null;
+    this.lastWebhookStatus = null; // 'ok' | 'failed'
+    this.lastWebhookAt = null;
+    this.lastWebhookError = null;
+
+    // Diagnostic: last error
+    this.lastError = null;
+    this.lastErrorAt = null;
+    this.lastErrorStack = null;
+
+    // CONNECTING watchdog: restart if stuck > N minutes
+    this.connectingWatchdogTimer = null;
+    this.connectingWatchdogStartAt = null;
   }
   
   /**
@@ -122,17 +137,18 @@ class InstanceContext {
     const oldState = this.state;
     this.state = newState;
     this.lastEvent = newState;
+    const ts = new Date().toISOString();
 
     debugLog(this.id, 'state_transition', { from: oldState, to: newState, reason: reason || undefined });
-    console.log(`[${this.id}] State transition: ${oldState} -> ${newState}${reason ? ` (${reason})` : ''}`);
+    console.log(`[${ts}] [${this.id}] State transition: ${oldState} -> ${newState}${reason ? ` (${reason})` : ''}`);
     
     // Handle state-specific actions
     if (newState === InstanceState.READY) {
       this.lastReadyAt = new Date();
       this.restartAttempts = 0; // Reset on successful ready
       this.restartHistory = []; // Clear restart history
-      // Debug patch: cancel watchdog, log authenticated->ready duration
       this.clearReadyWatchdog();
+      this.clearConnectingWatchdog();
       if (this.authenticatedAt) {
         const ms = this.lastReadyAt - this.authenticatedAt;
         debugLog(this.id, 'ready_after_authenticated_ms', { ms, authenticatedAt: this.authenticatedAt.toISOString() });
@@ -169,7 +185,9 @@ class InstanceContext {
     } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR) {
       // Stop send loop on terminal states
       stopSendLoop(this.id);
+      this.clearConnectingWatchdog();
     }
+    // Note: CONNECTING watchdog started only in softRestart/hardRestart, not in createInstance
   }
   
   /**
@@ -311,6 +329,29 @@ class InstanceContext {
   }
 
   /**
+   * Clear CONNECTING watchdog
+   */
+  clearConnectingWatchdog() {
+    if (this.connectingWatchdogTimer) {
+      clearTimeout(this.connectingWatchdogTimer);
+      this.connectingWatchdogTimer = null;
+    }
+    this.connectingWatchdogStartAt = null;
+  }
+
+  /**
+   * Start CONNECTING watchdog: if stuck in CONNECTING/NEEDS_QR for too long, restart
+   */
+  startConnectingWatchdog() {
+    this.clearConnectingWatchdog();
+    this.connectingWatchdogStartAt = new Date();
+    this.connectingWatchdogTimer = setTimeout(() => {
+      this.connectingWatchdogTimer = null;
+      onConnectingWatchdogTimeout(this.id);
+    }, config.connectingWatchdogMs);
+  }
+
+  /**
    * Get next allowed send time (for rate limiting)
    */
   getNextAllowedSendTime() {
@@ -347,11 +388,11 @@ async function onReadyWatchdogTimeout(instanceId) {
     state: instance.state,
   });
   console.error(`[${instanceId}] ready_timeout: ready event not fired after ${elapsedMs}ms`);
-  await forwardWebhook(instanceId, 'ready_timeout', {
+  void forwardWebhook(instanceId, 'ready_timeout', {
     elapsedMs,
     authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
     state: instance.state,
-  });
+  }).catch(() => {});
 
   if (!instance.readyWatchdogRestarted) {
     instance.readyWatchdogRestarted = true;
@@ -370,7 +411,36 @@ async function onReadyWatchdogTimeout(instanceId) {
 }
 
 /**
- * Forward webhook event
+ * CONNECTING watchdog: instance stuck in CONNECTING or NEEDS_QR for too long - restart
+ */
+async function onConnectingWatchdogTimeout(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) return;
+  if (instance.state !== InstanceState.CONNECTING && instance.state !== InstanceState.NEEDS_QR) return;
+
+  const elapsedMs = instance.connectingWatchdogStartAt ? Date.now() - instance.connectingWatchdogStartAt.getTime() : 0;
+  debugLog(instanceId, 'connecting_watchdog_timeout', { elapsedMs, state: instance.state });
+  console.error(`[${instanceId}] connecting_watchdog: stuck in ${instance.state} for ${elapsedMs}ms - restarting client`);
+  instance.lastError = `Stuck in ${instance.state} for ${elapsedMs}ms`;
+  instance.lastErrorAt = new Date();
+  instance.lastErrorStack = 'connecting_watchdog_timeout';
+
+  instance.clearConnectingWatchdog();
+  try {
+    if (instance.client) {
+      await hardRestartAndWaitReady(instanceId).catch(err => {
+        console.error(`[${instanceId}] connecting_watchdog restart failed:`, err.message);
+        instance.lastError = err.message;
+        instance.lastErrorStack = err.stack;
+      });
+    }
+  } catch (err) {
+    console.error(`[${instanceId}] connecting_watchdog restart error:`, err);
+  }
+}
+
+/**
+ * Forward webhook event (never blocks state transitions - failures are logged only)
  * Debug patch: authenticated and ready are always sent (included by default unless explicitly excluded)
  */
 async function forwardWebhook(instanceId, event, data) {
@@ -395,9 +465,17 @@ async function forwardWebhook(instanceId, event, data) {
       headers['x-wa-hub-signature'] = signature;
     }
     await axios.post(instance.webhookUrl, payload, { headers });
-    console.log(`[${instanceId}] Webhook forwarded: ${event}`);
+    instance.lastWebhookEvent = event;
+    instance.lastWebhookStatus = 'ok';
+    instance.lastWebhookAt = new Date();
+    instance.lastWebhookError = null;
+    console.log(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarded: ${event}`);
   } catch (error) {
-    console.error(`[${instanceId}] Webhook forwarding failed:`, error.message);
+    instance.lastWebhookEvent = event;
+    instance.lastWebhookStatus = 'failed';
+    instance.lastWebhookAt = new Date();
+    instance.lastWebhookError = error.message;
+    console.error(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarding failed: ${event} -`, error.message);
   }
 }
 
@@ -593,32 +671,39 @@ function setupEventListeners(instanceId, client) {
   const instance = instances.get(instanceId);
   if (!instance) return;
   
-  // QR code event
+  // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('qr', async (qr) => {
+    const ts = new Date().toISOString();
     debugLog(instanceId, 'qr', {});
-    console.log(`[${instanceId}] Event: qr`);
+    console.log(`[${ts}] [${instanceId}] Event: qr`);
     instance.qrReceivedDuringRestart = true;
-    instance.readyWatchdogRestarted = false; // Reset so each QR scan gets one timeout restart
+    instance.readyWatchdogRestarted = false;
     instance.startReadyWatchdog();
+    instance.clearConnectingWatchdog();
     try {
       const qrBase64 = await qrToBase64(qr);
       instance.qrCode = qrBase64;
       instance.lastQrUpdate = new Date();
       instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
-      await forwardWebhook(instanceId, 'qr', { qr: qrBase64 });
+      void forwardWebhook(instanceId, 'qr', { qr: qrBase64 }).catch(() => {});
     } catch (error) {
       console.error(`[${instanceId}] Error processing QR:`, error);
+      instance.lastError = error.message;
+      instance.lastErrorAt = new Date();
+      instance.lastErrorStack = error.stack;
     }
   });
   
   // Authenticated event
   client.on('authenticated', () => {
+    const ts = new Date().toISOString();
     instance.authenticatedAt = new Date();
     debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
-    console.log(`[${instanceId}] Event: authenticated`);
+    console.log(`[${ts}] [${instanceId}] Event: authenticated`);
     instance.lastEvent = 'authenticated';
-    instance.startReadyWatchdog(); // Restart watchdog: ready expected within timeout
-    forwardWebhook(instanceId, 'authenticated', {});
+    instance.clearConnectingWatchdog();
+    instance.startReadyWatchdog();
+    void forwardWebhook(instanceId, 'authenticated', {}).catch(() => {});
   });
   
   // Ready event
@@ -647,12 +732,16 @@ function setupEventListeners(instanceId, client) {
   
   // Auth failure
   client.on('auth_failure', (msg) => {
+    const ts = new Date().toISOString();
     debugLog(instanceId, 'auth_failure', { error: String(msg) });
-    console.error(`[${instanceId}] Event: auth_failure - ${msg}`);
+    console.error(`[${ts}] [${instanceId}] Event: auth_failure - ${msg}`);
     instance.lastAuthFailureAt = new Date();
+    instance.lastError = String(msg);
+    instance.lastErrorAt = new Date();
     instance.clearReadyWatchdog();
+    instance.clearConnectingWatchdog();
     instance.transitionTo(InstanceState.NEEDS_QR, `Auth failure: ${msg}`);
-    forwardWebhook(instanceId, 'auth_failure', { message: msg });
+    void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(() => {});
   });
   
   // Disconnected
@@ -682,14 +771,15 @@ function setupEventListeners(instanceId, client) {
         console.log(`[${instanceId}] Auto-reconnect disabled (DISABLE_AUTO_RECONNECT=true)`);
       }
     }
-    forwardWebhook(instanceId, 'disconnected', { reason: reasonStr });
+    void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(() => {});
   });
   
   // State change
   client.on('change_state', (state) => {
-    console.log(`[${instanceId}] Event: change_state - ${state}`);
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] [${instanceId}] Event: change_state - ${state}`);
     instance.lastEvent = `change_state:${state}`;
-    forwardWebhook(instanceId, 'change_state', { status: state });
+    void forwardWebhook(instanceId, 'change_state', { status: state }).catch(() => {});
   });
   
   // Message
@@ -787,6 +877,7 @@ async function softRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   console.log(`[${instanceId}] Starting soft restart...`);
   instance.transitionTo(InstanceState.CONNECTING, 'soft restart');
   instance.qrReceivedDuringRestart = false;
+  instance.startConnectingWatchdog();
   
   try {
     // Destroy existing client
@@ -821,6 +912,7 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   console.log(`[${instanceId}] Starting hard restart...`);
   instance.transitionTo(InstanceState.CONNECTING, 'hard restart');
   instance.qrReceivedDuringRestart = false;
+  instance.startConnectingWatchdog();
   
   // Clean up old client
   if (instance.client) {
@@ -1732,6 +1824,36 @@ function getInstanceCount() {
   return instances.size;
 }
 
+/**
+ * Get diagnostic info for an instance (for debugging stuck NEEDS_QR/CONNECTING)
+ */
+function getInstanceDiagnostics(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    return null;
+  }
+  return {
+    instanceId: instance.id,
+    name: instance.name,
+    state: instance.state,
+    lastEvent: instance.lastEvent,
+    lastEventAt: instance.lastReadyAt || instance.lastDisconnectAt || instance.lastAuthFailureAt || instance.authenticatedAt,
+    lastWebhookEvent: instance.lastWebhookEvent,
+    lastWebhookStatus: instance.lastWebhookStatus,
+    lastWebhookAt: instance.lastWebhookAt,
+    lastWebhookError: instance.lastWebhookError,
+    lastError: instance.lastError,
+    lastErrorAt: instance.lastErrorAt,
+    lastErrorStack: instance.lastErrorStack,
+    readyWatchdogStartAt: instance.readyWatchdogStartAt,
+    connectingWatchdogStartAt: instance.connectingWatchdogStartAt,
+    qrReceivedDuringRestart: instance.qrReceivedDuringRestart,
+    restartAttempts: instance.restartAttempts,
+    queueDepth: instance.queue.length,
+    sendLoopRunning: instance.sendLoopRunning,
+  };
+}
+
 module.exports = {
   InstanceState,
   createInstance,
@@ -1749,4 +1871,5 @@ module.exports = {
   clearQueue,
   getQueueDetails,
   triggerSendLoop,
+  getInstanceDiagnostics,
 };

@@ -44,14 +44,23 @@ CACHE_DIRS=(
   "Default/ShaderCache"
 )
 
-# Directories to NEVER delete
+# Directories to NEVER delete (session/auth/profile - CRITICAL)
 PROTECTED_DIRS=(
   ".wwebjs_auth"
-  ".wwebjs_cache"  # Keep for now - may contain session data
-  "Default/Local Storage"
-  "Default/IndexedDB"
-  "Default/Session Storage"
-  "Default/Application Cache"
+  ".wwebjs_cache"
+  "Local Storage"
+  "IndexedDB"
+  "Session Storage"
+  "Application Cache"
+  "Local Application Storage"
+  "Preferences"
+  "Web Data"
+  "Cookies"
+  "Login Data"
+  "History"
+  "Visited Links"
+  "puppeteer"
+  "userDataDir"
 )
 
 # Logging function
@@ -61,7 +70,7 @@ log() {
   local message="$*"
   local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   
-  echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
+  echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE" >&2
 }
 
 # Detect service type (PM2 or systemd)
@@ -169,7 +178,7 @@ format_bytes() {
   fi
 }
 
-# Check if directory is protected
+# Check if directory is protected (session/auth/profile - NEVER delete)
 is_protected() {
   local dir="$1"
   local basename=$(basename "$dir")
@@ -179,6 +188,12 @@ is_protected() {
       return 0
     fi
   done
+  
+  # Extra safeguard: never touch auth/session paths
+  if [[ "$dir" == *".wwebjs_auth"* ]] || [[ "$dir" == *"session-"*"/Local Storage"* ]] \
+     || [[ "$dir" == *"session-"*"/IndexedDB"* ]] || [[ "$dir" == *"session-"*"/Cookies"* ]]; then
+    return 0
+  fi
   
   return 1
 }
@@ -236,7 +251,7 @@ clean_tenant_cache() {
           if [ "$DRY_RUN" = "1" ]; then
             log "INFO" "    [DRY RUN] Would delete: $cache_dir ($size_formatted)"
           else
-            log "INFO" "    Deleting: $cache_dir ($size_formatted)"
+            log "INFO" "    Deleting (exact path): $cache_dir ($size_formatted)"
             rm -rf "$cache_dir"
             if [ $? -eq 0 ]; then
               total_deleted=$((total_deleted + size))
