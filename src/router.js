@@ -611,13 +611,26 @@ router.post('/instances/:id/queue/trigger', (req, res) => {
 });
 
 /**
+ * Measure event loop lag (ms) - helps detect VM pressure causing stuck states
+ */
+function measureEventLoopLag() {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    setImmediate(() => {
+      resolve(Date.now() - start);
+    });
+  });
+}
+
+/**
  * GET /instances/:id/diagnostics
  * Get per-instance diagnostic info (for debugging stuck NEEDS_QR/CONNECTING)
+ * Includes process resource metrics (memory, uptime, event loop lag)
  */
-router.get('/instances/:id/diagnostics', (req, res) => {
+router.get('/instances/:id/diagnostics', async (req, res) => {
   try {
     const instanceId = sanitizeInstanceId(getInstanceId(req.params));
-    
+
     if (!isValidInstanceId(instanceId)) {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
@@ -627,7 +640,24 @@ router.get('/instances/:id/diagnostics', (req, res) => {
       return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
     }
 
-    res.json(createSuccessResponse(diagnostics));
+    const mem = process.memoryUsage();
+    const eventLoopLagMs = await measureEventLoopLag();
+
+    const response = {
+      ...diagnostics,
+      process: {
+        memoryUsage: {
+          rss: mem.rss,
+          heapTotal: mem.heapTotal,
+          heapUsed: mem.heapUsed,
+          external: mem.external,
+        },
+        uptimeSeconds: Math.floor(process.uptime()),
+        eventLoopLagMs,
+      },
+    };
+
+    res.json(createSuccessResponse(response));
   } catch (error) {
     console.error('Error getting diagnostics:', error);
     res.status(500).json(createErrorResponse(error.message, 500));

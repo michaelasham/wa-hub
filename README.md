@@ -5,6 +5,21 @@ Multi-tenant WhatsApp Web session manager service built with Node.js, Express, a
 ## Features
 
 - **Multi-tenant session management**: Each merchant/shop gets its own isolated WhatsApp Web session
+
+## Canonical whatsapp-web.js lifecycle in wa-hub
+
+wa-hub follows whatsapp-web.js best practices for session persistence and lifecycle:
+
+1. **LocalAuth is the single source of truth** – Session data lives in `authBaseDir` (e.g. `./.wwebjs_auth/session-{clientId}/`). We never mutate or delete this while a client is running.
+
+2. **Event handlers before `initialize()`** – Listeners for `qr`, `authenticated`, `ready`, `auth_failure`, `disconnected`, `change_state` are attached before `client.initialize()`.
+
+3. **State transitions are immediate** – In each lifecycle handler, we update `InstanceState` first. Webhook forwarding is fire-and-forget and never blocks state transitions.
+
+4. **No custom `userDataDir`** – We do not set `puppeteer.userDataDir`; it would conflict with LocalAuth's session storage.
+
+5. **Queue isolation** – The message queue and `ensureReady()` are independent of lifecycle events. Lifecycle handlers never await the queue or webhooks.
+
 - **Persistent authentication**: Uses LocalAuth strategy with session-specific client IDs
 - **RESTful API**: Full API implementation matching WAAPI endpoints
 - **Webhook forwarding**: Automatically forwards WhatsApp events to your main application
@@ -520,15 +535,9 @@ The `wa-hub-cleanup.sh` script safely removes Chromium cache directories while p
 - ✅ MAX_DELETE_GB guard (prevents accidental huge deletions)
 - ✅ Detailed logging
 
-**What Gets Deleted:**
-- `Default/Cache`
-- `Default/Code Cache`
-- `Default/GPUCache`
-- `Default/Service Worker/CacheStorage`
-- `Default/Service Worker/ScriptCache`
-- `Default/Media Cache`
-- `Default/ShaderCache`
-- Similar directories in `Profile 1`, `Profile 2`, etc.
+**What Gets Deleted (allowlist only):**
+- `Default/Cache`, `Default/Code Cache`, `Default/GPUCache`
+- Same under `Profile 1`, `Profile 2`, etc.
 
 **What Never Gets Deleted:**
 - `.wwebjs_auth/` (authentication data)

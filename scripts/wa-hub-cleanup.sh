@@ -1,15 +1,16 @@
 #!/bin/bash
 #
 # WA-Hub Cache Cleanup Script
-# 
+#
 # Safely removes Chromium cache directories from tenant profiles while preserving
 # authentication data. Designed to run as a scheduled job (systemd timer or cron).
 #
-# Safety Features:
-# - DRY_RUN mode to preview deletions
-# - MAX_DELETE_GB guard to prevent accidental huge deletions
-# - Stops service before cleanup, starts after (prevents corruption)
-# - Detailed logging
+# CRITICAL: LocalAuth is the single source of truth for session persistence.
+# NEVER delete: .wwebjs_auth/**, LocalAuth dataPath/**, any active instance profile.
+# Cleanup runs ONLY when wa-hub service is stopped (no active clients).
+#
+# Safety: ALLOWLIST only - we delete ONLY known safe cache folders:
+#   Cache, Code Cache, GPUCache (under Default/ or Profile N/)
 #
 # Usage:
 #   DRY_RUN=1 ./scripts/wa-hub-cleanup.sh          # Preview only
@@ -33,35 +34,8 @@ TENANTS_DIR="${WA_HUB_TENANTS_DIR:-}"
 SERVICE_NAME="wa-hub"
 SERVICE_TYPE="unknown"
 
-# Cache directories to clean (relative to profile directory)
-CACHE_DIRS=(
-  "Default/Cache"
-  "Default/Code Cache"
-  "Default/GPUCache"
-  "Default/Service Worker/CacheStorage"
-  "Default/Service Worker/ScriptCache"
-  "Default/Media Cache"
-  "Default/ShaderCache"
-)
-
-# Directories to NEVER delete (session/auth/profile - CRITICAL)
-PROTECTED_DIRS=(
-  ".wwebjs_auth"
-  ".wwebjs_cache"
-  "Local Storage"
-  "IndexedDB"
-  "Session Storage"
-  "Application Cache"
-  "Local Application Storage"
-  "Preferences"
-  "Web Data"
-  "Cookies"
-  "Login Data"
-  "History"
-  "Visited Links"
-  "puppeteer"
-  "userDataDir"
-)
+# ALLOWLIST: Only these cache subdirs (under Default/, Profile 1/, etc.) are safe to delete.
+# NEVER add: Local Storage, IndexedDB, Cookies, Session Storage, Preferences, .wwebjs_auth, etc.
 
 # Logging function
 log() {
@@ -178,32 +152,20 @@ format_bytes() {
   fi
 }
 
-# Check if directory is protected (session/auth/profile - NEVER delete)
-is_protected() {
-  local dir="$1"
-  local basename=$(basename "$dir")
-  
-  for protected in "${PROTECTED_DIRS[@]}"; do
-    if [[ "$dir" == *"$protected"* ]] || [[ "$basename" == "$protected" ]]; then
-      return 0
-    fi
-  done
-  
-  # Extra safeguard: never touch auth/session paths
-  if [[ "$dir" == *".wwebjs_auth"* ]] || [[ "$dir" == *"session-"*"/Local Storage"* ]] \
-     || [[ "$dir" == *"session-"*"/IndexedDB"* ]] || [[ "$dir" == *"session-"*"/Cookies"* ]]; then
-    return 0
-  fi
-  
-  return 1
-}
+# ALLOWLIST only: these are the ONLY cache subdirs we delete. Never touch session/auth.
+SAFE_CACHE_NAMES=("Cache" "Code Cache" "GPUCache")
 
 # Clean cache directories in a tenant
+# WHY ACTIVE PROFILES MUST NOT BE CLEANED: Chromium may crash or hang if Cache/GPUCache/Code
+# Cache are deleted while the browser is running. We only run when service is stopped and no
+# process has tenant data open (verified via lsof/fuser).
+# We delete ONLY Cache, Code Cache, GPUCache under each profile. Everything else is skipped.
 clean_tenant_cache() {
   local tenant_dir="$1"
   local tenant_name=$(basename "$tenant_dir")
   local total_deleted=0
   local deleted_count=0
+  local skipped_count=0
   
   log "INFO" "Scanning tenant: $tenant_name"
   
@@ -218,33 +180,24 @@ clean_tenant_cache() {
     done < <(find "$tenant_dir" -maxdepth 1 -type d -print0 2>/dev/null || true)
   fi
   
-  # Clean each profile
   for profile_dir in "${profiles[@]}"; do
     local profile_name=$(basename "$profile_dir")
     log "INFO" "  Processing profile: $profile_name"
     
-    # Clean each cache directory
-    for cache_rel in "${CACHE_DIRS[@]}"; do
-      local cache_dir="$profile_dir/$cache_rel"
+    for cache_name in "${SAFE_CACHE_NAMES[@]}"; do
+      local cache_dir="$profile_dir/$cache_name"
+      local cache_rel="$profile_name/$cache_name"
       
       if [ -d "$cache_dir" ]; then
-        # Check if protected
-        if is_protected "$cache_dir"; then
-          log "WARN" "    Skipping protected directory: $cache_rel"
-          continue
-        fi
-        
         local size=$(get_dir_size "$cache_dir")
         
         if [ "$size" -gt 0 ]; then
           local size_formatted=$(format_bytes "$size")
-          log "INFO" "    Found cache: $cache_rel ($size_formatted)"
           
-          # Check MAX_DELETE_GB limit
           local size_gb=$((size / 1024 / 1024 / 1024))
           if [ "$size_gb" -gt "$MAX_DELETE_GB" ]; then
-            log "ERROR" "    Cache size ($size_formatted) exceeds MAX_DELETE_GB ($MAX_DELETE_GB GB). Skipping."
-            log "ERROR" "    Set MAX_DELETE_GB to a higher value to allow deletion."
+            log "WARN" "    SKIP (exceeds MAX_DELETE_GB ${MAX_DELETE_GB}GB): $cache_rel ($size_formatted)"
+            skipped_count=$((skipped_count + 1))
             continue
           fi
           
@@ -266,12 +219,12 @@ clean_tenant_cache() {
     done
   done
   
-  # Also check for .wwebjs_cache in tenant root (but don't delete it - may contain session data)
-  # We'll skip this for now as it may contain important data
-  
   if [ "$deleted_count" -gt 0 ]; then
     local total_formatted=$(format_bytes "$total_deleted")
-    log "INFO" "  Tenant $tenant_name: Deleted $deleted_count cache directories ($total_formatted)"
+    log "INFO" "  Tenant $tenant_name: Deleted $deleted_count cache dirs ($total_formatted)"
+  fi
+  if [ "$skipped_count" -gt 0 ]; then
+    log "INFO" "  Tenant $tenant_name: Skipped $skipped_count paths (exceeded limit)"
   fi
   
   echo "$total_deleted"
@@ -315,8 +268,44 @@ main() {
   detect_service
   stop_service
   
-  # Wait a bit to ensure Chromium processes have fully stopped
-  sleep 3
+  # Wait for wa-hub and Chromium to fully exit (Chromium may take a few seconds after node dies)
+  sleep 5
+
+  # GUARD: Only clean when NO process is using tenant data.
+  # Chromium may crash or hang if Cache/GPUCache/Code Cache are deleted while running.
+  # Active profiles (client exists, state != STOPPED) must never be cleaned.
+  if command -v lsof >/dev/null 2>&1; then
+    local open_count=0
+    open_count=$(lsof +D "$TENANTS_DIR" 2>/dev/null | wc -l | tr -d ' \n') || true
+    open_count=${open_count:-0}
+    if [ "$open_count" -gt 0 ]; then
+      log "ERROR" "SKIP CLEANUP: Processes still have tenant data open (lsof found $open_count references)"
+      log "ERROR" "  Reason: wa-hub or Chromium not fully stopped. Ensure service is stopped and wait for Chromium to exit."
+      start_service
+      exit 1
+    fi
+  elif command -v fuser >/dev/null 2>&1; then
+    local pids
+    pids=$(fuser -m "$TENANTS_DIR" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      log "ERROR" "SKIP CLEANUP: Processes using tenant data: $pids"
+      log "ERROR" "  Reason: wa-hub or Chromium not fully stopped."
+      start_service
+      exit 1
+    fi
+  else
+    log "WARN" "Cannot verify no active processes (lsof/fuser not found). Proceeding with caution."
+  fi
+
+  # Double-check: wa-hub server process should be gone (instance-manager is the main module)
+  if pgrep -f "instance-manager" >/dev/null 2>&1; then
+    log "ERROR" "SKIP CLEANUP: wa-hub process still running (pgrep found instance-manager)"
+    log "ERROR" "  Reason: Service stop may have failed. Ensure wa-hub is fully stopped."
+    start_service
+    exit 1
+  fi
+
+  log "INFO" "Verified: no active processes using tenant data. Safe to clean."
   
   # Find all tenant directories
   local tenants=()

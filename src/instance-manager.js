@@ -128,6 +128,11 @@ class InstanceContext {
     // CONNECTING watchdog: restart if stuck > N minutes
     this.connectingWatchdogTimer = null;
     this.connectingWatchdogStartAt = null;
+    this.connectingWatchdogRestartCount = 0; // Reset on READY/NEEDS_QR
+
+    // Diagnostics: last lifecycle event (for whatsapp-web.js audit)
+    this.lastLifecycleEvent = null;
+    this.lastLifecycleEventAt = null;
   }
   
   /**
@@ -147,6 +152,7 @@ class InstanceContext {
       this.lastReadyAt = new Date();
       this.restartAttempts = 0; // Reset on successful ready
       this.restartHistory = []; // Clear restart history
+      this.connectingWatchdogRestartCount = 0;
       this.clearReadyWatchdog();
       this.clearConnectingWatchdog();
       if (this.authenticatedAt) {
@@ -186,6 +192,7 @@ class InstanceContext {
       // Stop send loop on terminal states
       stopSendLoop(this.id);
       this.clearConnectingWatchdog();
+      this.connectingWatchdogRestartCount = 0;
     }
     // Note: CONNECTING watchdog started only in softRestart/hardRestart, not in createInstance
   }
@@ -341,6 +348,7 @@ class InstanceContext {
 
   /**
    * Start CONNECTING watchdog: if stuck in CONNECTING/NEEDS_QR for too long, restart
+   * Count is NOT reset here - only when we reach READY or NEEDS_QR (progress)
    */
   startConnectingWatchdog() {
     this.clearConnectingWatchdog();
@@ -392,7 +400,7 @@ async function onReadyWatchdogTimeout(instanceId) {
     elapsedMs,
     authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
     state: instance.state,
-  }).catch(() => {});
+  }).catch(err => recordWebhookError(instanceId, err));
 
   if (!instance.readyWatchdogRestarted) {
     instance.readyWatchdogRestarted = true;
@@ -412,15 +420,28 @@ async function onReadyWatchdogTimeout(instanceId) {
 
 /**
  * CONNECTING watchdog: instance stuck in CONNECTING or NEEDS_QR for too long - restart
+ * After max restarts, transition to ERROR (no more restarts)
  */
 async function onConnectingWatchdogTimeout(instanceId) {
   const instance = instances.get(instanceId);
   if (!instance) return;
   if (instance.state !== InstanceState.CONNECTING && instance.state !== InstanceState.NEEDS_QR) return;
 
+  instance.connectingWatchdogRestartCount = (instance.connectingWatchdogRestartCount || 0) + 1;
   const elapsedMs = instance.connectingWatchdogStartAt ? Date.now() - instance.connectingWatchdogStartAt.getTime() : 0;
-  debugLog(instanceId, 'connecting_watchdog_timeout', { elapsedMs, state: instance.state });
-  console.error(`[${instanceId}] connecting_watchdog: stuck in ${instance.state} for ${elapsedMs}ms - restarting client`);
+  debugLog(instanceId, 'connecting_watchdog_timeout', { elapsedMs, state: instance.state, restartCount: instance.connectingWatchdogRestartCount });
+  console.error(`[${instanceId}] connecting_watchdog: stuck in ${instance.state} for ${elapsedMs}ms (restart #${instance.connectingWatchdogRestartCount})`);
+
+  if (instance.connectingWatchdogRestartCount >= config.connectingWatchdogMaxRestarts) {
+    instance.lastError = `Stuck in ${instance.state} for ${elapsedMs}ms - max watchdog restarts (${config.connectingWatchdogMaxRestarts}) exceeded`;
+    instance.lastErrorAt = new Date();
+    instance.lastErrorStack = 'connecting_watchdog_max_restarts';
+    instance.clearConnectingWatchdog();
+    instance.transitionTo(InstanceState.ERROR, instance.lastError);
+    console.error(`[${instanceId}] connecting_watchdog: moved to ERROR state - manual intervention required`);
+    return;
+  }
+
   instance.lastError = `Stuck in ${instance.state} for ${elapsedMs}ms`;
   instance.lastErrorAt = new Date();
   instance.lastErrorStack = 'connecting_watchdog_timeout';
@@ -440,8 +461,33 @@ async function onConnectingWatchdogTimeout(instanceId) {
 }
 
 /**
+ * Record webhook error for observability. Stores error, logs once per failure type (avoid spam).
+ * Does NOT rethrow.
+ */
+function recordWebhookError(instanceId, err) {
+  const instance = instances.get(instanceId);
+  if (!instance) return;
+
+  const msg = err?.message || String(err);
+  const failureType = msg.length > 80 ? msg.substring(0, 80) + '...' : msg;
+  instance.lastWebhookError = msg;
+  instance.lastWebhookAt = new Date();
+  instance.lastWebhookStatus = 'failed';
+
+  // Log once per failure type per 5 min (avoid spam)
+  const now = Date.now();
+  const key = `${instanceId}:${failureType}`;
+  if (!recordWebhookError._lastLog) recordWebhookError._lastLog = {};
+  const last = recordWebhookError._lastLog[key];
+  if (!last || now - last > 300000) {
+    recordWebhookError._lastLog[key] = now;
+    console.error(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarding failed:`, msg);
+  }
+}
+
+/**
  * Forward webhook event (never blocks state transitions - failures are logged only)
- * Debug patch: authenticated and ready are always sent (included by default unless explicitly excluded)
+ * Callers use .catch(err => recordWebhookError(instanceId, err)) - do NOT rethrow.
  */
 async function forwardWebhook(instanceId, event, data) {
   const instance = instances.get(instanceId);
@@ -453,9 +499,9 @@ async function forwardWebhook(instanceId, event, data) {
     instance.webhookEvents.length === 0 ||
     instance.webhookEvents.includes(event);
   if (!shouldSend) return;
-  
+
   const payload = { event, instanceId, data };
-  
+
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (config.webhookSecret) {
@@ -475,7 +521,7 @@ async function forwardWebhook(instanceId, event, data) {
     instance.lastWebhookStatus = 'failed';
     instance.lastWebhookAt = new Date();
     instance.lastWebhookError = error.message;
-    console.error(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarding failed: ${event} -`, error.message);
+    recordWebhookError(instanceId, error);
   }
 }
 
@@ -556,20 +602,17 @@ async function copyDirectory(src, dest) {
 
 /**
  * Create WhatsApp client with isolated LocalAuth
+ *
+ * WHY LOCALAUTH DIRECTORIES ARE IMMUTABLE: LocalAuth stores session tokens, encryption keys,
+ * and browser profile data under dataPath. Deleting or mutating these while a client is running
+ * causes Chromium to crash or hang. Cleanup must run only when the service is fully stopped.
+ *
+ * CANONICAL whatsapp-web.js: LocalAuth is the single source of truth for session persistence.
+ * - clientId: unique per instance (LocalAuth creates session-{clientId}/ under dataPath)
+ * - dataPath: config.authBaseDir (e.g. ./.wwebjs_auth/) - NEVER mutate this while client is running
+ * - We do NOT set puppeteer.userDataDir - it would conflict with LocalAuth's session storage
  */
 async function createClient(instanceId, instanceName) {
-  const authDataPath = path.join(config.authBaseDir, sanitizeInstanceId(instanceId));
-  
-  // Ensure auth directory exists
-  try {
-    await fs.mkdir(authDataPath, { recursive: true });
-  } catch (error) {
-    console.warn(`[${instanceId}] Could not create auth directory:`, error.message);
-  }
-  
-  // Use default LocalAuth path (same as old sessions.js) for backward compatibility
-  // When dataPath is not specified, LocalAuth uses: .wwebjs_auth/session-{clientId}/
-  // This matches the old behavior where instances auto-reconnected after restart
   const sanitizedClientId = sanitizeInstanceId(instanceId);
   
   // Build Puppeteer config with robust args for headless Linux environments
@@ -657,8 +700,7 @@ async function createClient(instanceId, instanceName) {
   return new Client({
     authStrategy: new LocalAuth({
       clientId: sanitizedClientId,
-      // Don't specify dataPath - use LocalAuth default (.wwebjs_auth/session-{clientId}/)
-      // This ensures backward compatibility with existing session data
+      dataPath: config.authBaseDir,
     }),
     puppeteer: puppeteerConfig,
   });
@@ -666,54 +708,68 @@ async function createClient(instanceId, instanceName) {
 
 /**
  * Set up event listeners for WhatsApp client
+ *
+ * WHY LIFECYCLE HANDLERS MUST BE SIDE-EFFECT SAFE: whatsapp-web.js emits qr, authenticated,
+ * ready, auth_failure, disconnected, change_state synchronously. If we await webhooks or queues
+ * inside these handlers, we block the event loop and delay further events. State transitions must
+ * happen immediately; webhooks are fire-and-forget.
  */
 function setupEventListeners(instanceId, client) {
   const instance = instances.get(instanceId);
   if (!instance) return;
   
   // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
-  client.on('qr', async (qr) => {
+  client.on('qr', (qr) => {
     const ts = new Date().toISOString();
+    instance.lastLifecycleEvent = 'qr';
+    instance.lastLifecycleEventAt = new Date();
     debugLog(instanceId, 'qr', {});
     console.log(`[${ts}] [${instanceId}] Event: qr`);
     instance.qrReceivedDuringRestart = true;
     instance.readyWatchdogRestarted = false;
     instance.startReadyWatchdog();
     instance.clearConnectingWatchdog();
-    try {
-      const qrBase64 = await qrToBase64(qr);
+    instance.connectingWatchdogRestartCount = 0; // Progress: got QR
+    instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
+    qrToBase64(qr).then((qrBase64) => {
       instance.qrCode = qrBase64;
       instance.lastQrUpdate = new Date();
-      instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
-      void forwardWebhook(instanceId, 'qr', { qr: qrBase64 }).catch(() => {});
-    } catch (error) {
+      void forwardWebhook(instanceId, 'qr', { qr: qrBase64 }).catch(err => recordWebhookError(instanceId, err));
+    }).catch((error) => {
       console.error(`[${instanceId}] Error processing QR:`, error);
       instance.lastError = error.message;
       instance.lastErrorAt = new Date();
       instance.lastErrorStack = error.stack;
-    }
+      void forwardWebhook(instanceId, 'qr', { error: error.message }).catch(err => recordWebhookError(instanceId, err));
+    });
   });
   
-  // Authenticated event
+  // Authenticated event - state stays CONNECTING until ready
   client.on('authenticated', () => {
     const ts = new Date().toISOString();
+    instance.lastLifecycleEvent = 'authenticated';
+    instance.lastLifecycleEventAt = new Date();
     instance.authenticatedAt = new Date();
     debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
     console.log(`[${ts}] [${instanceId}] Event: authenticated`);
     instance.lastEvent = 'authenticated';
     instance.clearConnectingWatchdog();
+    instance.connectingWatchdogRestartCount = 0; // Progress: authenticated
     instance.startReadyWatchdog();
-    void forwardWebhook(instanceId, 'authenticated', {}).catch(() => {});
+    void forwardWebhook(instanceId, 'authenticated', {}).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Ready event
-  client.on('ready', async () => {
+  // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
+  client.on('ready', () => {
+    const ts = new Date().toISOString();
     debugLog(instanceId, 'ready', {
       authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
       authenticatedToReadyMs: instance.authenticatedAt ? Date.now() - instance.authenticatedAt.getTime() : null,
     });
-    console.log(`[${instanceId}] Event: ready`);
+    console.log(`[${ts}] [${instanceId}] Event: ready`);
     instance.lastEvent = 'ready';
+    instance.lastLifecycleEvent = 'ready';
+    instance.lastLifecycleEventAt = new Date();
     try {
       const info = client.info;
       if (info) {
@@ -724,15 +780,15 @@ function setupEventListeners(instanceId, client) {
       console.error(`[${instanceId}] Error getting client info:`, error);
     }
     instance.transitionTo(InstanceState.READY);
-    await forwardWebhook(instanceId, 'ready', { status: 'ready' });
-    
-    // Start send loop on ready (steady drain)
+    void forwardWebhook(instanceId, 'ready', { status: 'ready' }).catch(err => recordWebhookError(instanceId, err));
     startSendLoop(instanceId);
   });
   
-  // Auth failure
+  // Auth failure - state transition FIRST, webhook fire-and-forget
   client.on('auth_failure', (msg) => {
     const ts = new Date().toISOString();
+    instance.lastLifecycleEvent = 'auth_failure';
+    instance.lastLifecycleEventAt = new Date();
     debugLog(instanceId, 'auth_failure', { error: String(msg) });
     console.error(`[${ts}] [${instanceId}] Event: auth_failure - ${msg}`);
     instance.lastAuthFailureAt = new Date();
@@ -741,12 +797,14 @@ function setupEventListeners(instanceId, client) {
     instance.clearReadyWatchdog();
     instance.clearConnectingWatchdog();
     instance.transitionTo(InstanceState.NEEDS_QR, `Auth failure: ${msg}`);
-    void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(() => {});
+    void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Disconnected
+  // Disconnected - state transition in handler, webhook fire-and-forget
   client.on('disconnected', (reason) => {
     const reasonStr = reason || 'unknown';
+    instance.lastLifecycleEvent = 'disconnected';
+    instance.lastLifecycleEventAt = new Date();
     debugLog(instanceId, 'disconnected', { reason: reasonStr });
     console.log(`[${instanceId}] Event: disconnected - ${reasonStr}`);
     instance.lastDisconnectAt = new Date();
@@ -771,55 +829,49 @@ function setupEventListeners(instanceId, client) {
         console.log(`[${instanceId}] Auto-reconnect disabled (DISABLE_AUTO_RECONNECT=true)`);
       }
     }
-    void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(() => {});
+    void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // State change
+  // State change (whatsapp-web.js internal state, not our InstanceState)
   client.on('change_state', (state) => {
     const ts = new Date().toISOString();
+    instance.lastLifecycleEvent = `change_state:${state}`;
+    instance.lastLifecycleEventAt = new Date();
     console.log(`[${ts}] [${instanceId}] Event: change_state - ${state}`);
     instance.lastEvent = `change_state:${state}`;
-    void forwardWebhook(instanceId, 'change_state', { status: state }).catch(() => {});
+    void forwardWebhook(instanceId, 'change_state', { status: state }).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Message
-  client.on('message', async (message) => {
-    try {
-      const messageData = {
-        message: {
-          from: extractPhoneNumber(message.from),
-          body: message.body || message.text || '',
-          text: message.body || message.text || '',
-          type: message.type || 'text',
-          timestamp: message.timestamp,
-          id: message.id?._serialized || message.id || null,
-        },
-      };
-      await forwardWebhook(instanceId, 'message', messageData);
-    } catch (error) {
-      console.error(`[${instanceId}] Error processing message:`, error);
-    }
+  // Message - fire-and-forget webhook (never block lifecycle)
+  client.on('message', (message) => {
+    const messageData = {
+      message: {
+        from: extractPhoneNumber(message.from),
+        body: message.body || message.text || '',
+        text: message.body || message.text || '',
+        type: message.type || 'text',
+        timestamp: message.timestamp,
+        id: message.id?._serialized || message.id || null,
+      },
+    };
+    void forwardWebhook(instanceId, 'message', messageData).catch(err => recordWebhookError(instanceId, err));
   });
-  
-  // Vote update
-  client.on('vote_update', async (vote) => {
-    try {
-      const voteData = {
-        vote: {
-          voter: extractPhoneNumber(vote.voter || vote.from || vote.chatId),
-          selectedOptions: vote.selectedOptions || vote.selected_options || vote.options || [],
-          timestamp: vote.timestamp || vote.interractedAtTs || Date.now(),
-          pollMessageId:
-            (vote.parentMsgKey && (vote.parentMsgKey._serialized || vote.parentMsgKey.id || vote.parentMsgKey._serialized)) ||
-            (vote.parentMessage && vote.parentMessage.id && (vote.parentMessage.id._serialized || vote.parentMessage.id)) ||
-            (vote.id && (vote.id._serialized || vote.id)) ||
-            null,
-        },
-      };
-      await forwardWebhook(instanceId, 'vote_update', voteData);
-    } catch (error) {
-      console.error(`[${instanceId}] Error processing vote:`, error);
-    }
+
+  // Vote update - fire-and-forget webhook (never block lifecycle)
+  client.on('vote_update', (vote) => {
+    const voteData = {
+      vote: {
+        voter: extractPhoneNumber(vote.voter || vote.from || vote.chatId),
+        selectedOptions: vote.selectedOptions || vote.selected_options || vote.options || [],
+        timestamp: vote.timestamp || vote.interractedAtTs || Date.now(),
+        pollMessageId:
+          (vote.parentMsgKey && (vote.parentMsgKey._serialized || vote.parentMsgKey.id || vote.parentMsgKey._serialized)) ||
+          (vote.parentMessage && vote.parentMessage.id && (vote.parentMessage.id._serialized || vote.parentMessage.id)) ||
+          (vote.id && (vote.id._serialized || vote.id)) ||
+          null,
+      },
+    };
+    void forwardWebhook(instanceId, 'vote_update', voteData).catch(err => recordWebhookError(instanceId, err));
   });
 }
 
@@ -1836,8 +1888,10 @@ function getInstanceDiagnostics(instanceId) {
     instanceId: instance.id,
     name: instance.name,
     state: instance.state,
+    lastLifecycleEvent: instance.lastLifecycleEvent,
+    lastLifecycleEventAt: instance.lastLifecycleEventAt,
     lastEvent: instance.lastEvent,
-    lastEventAt: instance.lastReadyAt || instance.lastDisconnectAt || instance.lastAuthFailureAt || instance.authenticatedAt,
+    lastEventTimestamp: instance.lastLifecycleEventAt || instance.lastReadyAt || instance.lastDisconnectAt || instance.lastAuthFailureAt || instance.authenticatedAt,
     lastWebhookEvent: instance.lastWebhookEvent,
     lastWebhookStatus: instance.lastWebhookStatus,
     lastWebhookAt: instance.lastWebhookAt,
@@ -1847,10 +1901,13 @@ function getInstanceDiagnostics(instanceId) {
     lastErrorStack: instance.lastErrorStack,
     readyWatchdogStartAt: instance.readyWatchdogStartAt,
     connectingWatchdogStartAt: instance.connectingWatchdogStartAt,
+    connectingWatchdogRestartCount: instance.connectingWatchdogRestartCount || 0,
     qrReceivedDuringRestart: instance.qrReceivedDuringRestart,
     restartAttempts: instance.restartAttempts,
+    restartCount: instance.restartAttempts,
     queueDepth: instance.queue.length,
     sendLoopRunning: instance.sendLoopRunning,
+    activeForCleanup: !!(instance.client && (instance.state === InstanceState.READY || instance.state === InstanceState.CONNECTING || instance.state === InstanceState.DISCONNECTED)),
   };
 }
 

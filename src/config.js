@@ -23,6 +23,7 @@ const config = {
   instancesDataPath: process.env.INSTANCES_DATA_PATH || './.wwebjs_instances.json',
   
   // LocalAuth base directory (per-instance auth directories will be created under this)
+  // NEVER mutate or delete contents while wa-hub is running - Chromium may crash or hang
   authBaseDir: process.env.AUTH_BASE_DIR || process.env.SESSION_DATA_PATH || './.wwebjs_auth',
   
   // Chromium/Chrome executable path (for Puppeteer)
@@ -67,6 +68,7 @@ const config = {
 
   // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
   connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
+  connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '3', 10), // After this many, move to ERROR
 };
 
 // No default webhook URL - each instance must specify its own webhook URL
