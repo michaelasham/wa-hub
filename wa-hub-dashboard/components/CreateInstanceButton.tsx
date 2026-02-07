@@ -68,7 +68,7 @@ export function CreateInstanceButton({ onCreated }: { onCreated?: () => void }) 
   return (
     <>
       <Button
-        primary
+        variant="primary"
         onClick={() => setOpen(true)}
         data-create-instance
       >
@@ -108,7 +108,7 @@ export function CreateInstanceButton({ onCreated }: { onCreated?: () => void }) 
           />
           {error && (
             <div style={{ marginTop: '1rem' }}>
-              <Banner status="critical">
+              <Banner tone="critical">
                 <p>{error}</p>
               </Banner>
             </div>

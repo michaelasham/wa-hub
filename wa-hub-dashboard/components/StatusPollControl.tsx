@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, Text, Button, Stack } from '@shopify/polaris';
+import { Card, Text, Button, BlockStack, InlineStack } from '@shopify/polaris';
 
 export function StatusPollControl({ instanceId }: { instanceId: string }) {
   const [polling, setPolling] = useState(false);
@@ -43,19 +43,19 @@ export function StatusPollControl({ instanceId }: { instanceId: string }) {
         <Text variant="headingMd" as="h2">
           Status Polling
         </Text>
-        <Stack vertical spacing="tight">
-          <Stack>
-            <Button onClick={start} disabled={polling} primary>
+        <BlockStack gap="200">
+          <InlineStack gap="200">
+            <Button onClick={start} disabled={polling} variant="primary">
               Start status poll
             </Button>
             <Button onClick={stop} disabled={!polling}>
               Stop
             </Button>
-          </Stack>
-          <Text as="p" variant="bodySm" color="subdued">
+          </InlineStack>
+          <Text as="p" variant="bodySm" tone="subdued">
             {polling ? 'Polling /client/status every 3s' : 'Stopped'}
           </Text>
-        </Stack>
+        </BlockStack>
       </div>
     </Card>
   );

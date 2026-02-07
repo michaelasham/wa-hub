@@ -1,6 +1,6 @@
 'use client';
 
-import { Card, Text, Badge, Spinner, Collapsible, Stack, InlineCode } from '@shopify/polaris';
+import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 import { useState } from 'react';
 
@@ -41,13 +41,13 @@ export function ConnectionPanel({
   const getLifecycleBadge = (rank: number) => {
     switch (rank) {
       case 3:
-        return <Badge status="success">{RANK_LABELS[rank]}</Badge>;
+        return <Badge tone="success">{RANK_LABELS[rank]}</Badge>;
       case 2:
-        return <Badge status="info">{RANK_LABELS[rank]}</Badge>;
+        return <Badge tone="info">{RANK_LABELS[rank]}</Badge>;
       case 1:
-        return <Badge status="attention">{RANK_LABELS[rank]}</Badge>;
+        return <Badge tone="attention">{RANK_LABELS[rank]}</Badge>;
       default:
-        return <Badge status="critical">{RANK_LABELS[rank]}</Badge>;
+        return <Badge tone="critical">{RANK_LABELS[rank]}</Badge>;
     }
   };
 
@@ -62,7 +62,7 @@ export function ConnectionPanel({
             <Spinner accessibilityLabel="Loading connection status" size="small" />
           </div>
         ) : (
-          <Stack vertical spacing="tight">
+          <BlockStack gap="200">
             <div>
               <Text as="p" variant="bodyMd" fontWeight="semibold">
                 wa-hub status:
@@ -78,9 +78,11 @@ export function ConnectionPanel({
               <div style={{ marginTop: '0.5rem' }}>
                 {getLifecycleBadge(rank)}
               </div>
-              <Text as="p" variant="bodySm" color="subdued" style={{ marginTop: '0.25rem' }}>
-                needs_qr → syncing → active
-              </Text>
+              <div style={{ marginTop: '0.25rem' }}>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  needs_qr → syncing → active
+                </Text>
+              </div>
             </div>
             {lastWebhook && (
               <div>
@@ -120,7 +122,7 @@ export function ConnectionPanel({
                 </Collapsible>
               </div>
             )}
-          </Stack>
+          </BlockStack>
         )}
       </div>
     </Card>

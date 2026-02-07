@@ -41,13 +41,13 @@ export default function HomePage() {
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'ready':
-        return <Badge status="success">Ready</Badge>;
+        return <Badge tone="success">Ready</Badge>;
       case 'qr':
-        return <Badge status="attention">QR Code Required</Badge>;
+        return <Badge tone="attention">QR Code Required</Badge>;
       case 'initializing':
-        return <Badge status="info">Initializing</Badge>;
+        return <Badge tone="info">Initializing</Badge>;
       case 'disconnected':
-        return <Badge status="critical">Disconnected</Badge>;
+        return <Badge tone="critical">Disconnected</Badge>;
       default:
         return <Badge>{status}</Badge>;
     }
@@ -59,7 +59,7 @@ export default function HomePage() {
       <Button
         key={`name-${inst.id}`}
         url={`/instances/${encodeURIComponent(inst.id)}`}
-        plain
+        variant="plain"
       >
         {inst.name || inst.id}
       </Button>,
@@ -68,7 +68,7 @@ export default function HomePage() {
       <Button
         key={`action-${inst.id}`}
         url={`/instances/${encodeURIComponent(inst.id)}`}
-        plain
+        variant="plain"
       >
         View
       </Button>,
@@ -103,19 +103,19 @@ export default function HomePage() {
         ]}
       >
         {reachable === false && (
-          <Banner status="critical" title="Connection Error">
+          <Banner tone="critical" title="Connection Error">
             <p>wa-hub service is unreachable. Check WA_HUB_BASE_URL and ensure wa-hub is running.</p>
           </Banner>
         )}
 
         {reachable === null && (
-          <Banner status="info" title="Checking connection">
+          <Banner tone="info" title="Checking connection">
             <p>Verifying connection to wa-hub service...</p>
           </Banner>
         )}
 
         {error && (
-          <Banner status="critical" title="Error">
+          <Banner tone="critical" title="Error">
             <p>
               {error} {reachable === false && '(401/403: check WA_HUB_TOKEN)'}
             </p>
@@ -127,13 +127,14 @@ export default function HomePage() {
             <div style={{ padding: '2rem', textAlign: 'center' }}>
               <Spinner accessibilityLabel="Loading instances" size="large" />
               <div style={{ marginTop: '1rem' }}>
-                <Text as="p" color="subdued">
+                <Text as="p" tone="subdued">
                   Loading instances...
                 </Text>
               </div>
             </div>
           ) : instances.length === 0 ? (
             <EmptyState
+              image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
               heading="No WhatsApp instances"
               action={{
                 content: 'Create instance',

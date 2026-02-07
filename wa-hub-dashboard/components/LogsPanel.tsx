@@ -1,6 +1,6 @@
 'use client';
 
-import { Card, Text, Stack, Collapsible, Badge, InlineCode, EmptyState } from '@shopify/polaris';
+import { Card, Text, BlockStack, InlineStack, Collapsible, Badge, InlineCode, EmptyState } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 import { useState } from 'react';
 
@@ -36,11 +36,11 @@ export function LogsPanel({
         </Text>
         <div style={{ maxHeight: '400px', overflow: 'auto', marginTop: '1rem' }}>
           {logs.length === 0 ? (
-            <EmptyState heading="No API logs">
+            <EmptyState image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png" heading="No API logs">
               <p>API request logs will appear here.</p>
             </EmptyState>
           ) : (
-            <Stack vertical spacing="tight">
+            <BlockStack gap="200">
               {logs.map((ev, i) => {
                 const d = ev.data as {
                   method?: string;
@@ -77,19 +77,19 @@ export function LogsPanel({
                         justifyContent: 'space-between',
                       }}
                     >
-                      <Stack spacing="tight">
+                      <InlineStack gap="200">
                         <InlineCode>{d.method}</InlineCode>
-                        <Text as="span" variant="bodySm" color="subdued">
+                        <Text as="span" variant="bodySm" tone="subdued">
                           {d.path}
                         </Text>
-                        <Badge status={isError ? 'critical' : 'success'}>
-                          {d.statusCode ?? '—'}
+                        <Badge tone={isError ? 'critical' : 'success'}>
+                          {String(d.statusCode ?? '—')}
                         </Badge>
-                        <Text as="span" variant="bodySm" color="subdued">
+                        <Text as="span" variant="bodySm" tone="subdued">
                           {d.latencyMs}ms
                         </Text>
-                      </Stack>
-                      <Text as="span" variant="bodySm" color="subdued">
+                      </InlineStack>
+                      <Text as="span" variant="bodySm" tone="subdued">
                         {isOpen ? '▼' : '▶'}
                       </Text>
                     </button>
@@ -98,7 +98,8 @@ export function LogsPanel({
                       id={`log-${i}`}
                       transition={{ duration: '200ms', timingFunction: 'ease-in-out' }}
                     >
-                      <Stack vertical spacing="tight" style={{ marginTop: '0.5rem' }}>
+                      <div style={{ marginTop: '0.5rem' }}>
+                        <BlockStack gap="200">
                         <div>
                           <Text as="p" variant="bodySm" fontWeight="semibold">
                             Request:
@@ -123,12 +124,13 @@ export function LogsPanel({
                             </InlineCode>
                           </div>
                         </div>
-                      </Stack>
+                        </BlockStack>
+                      </div>
                     </Collapsible>
                   </div>
                 );
               })}
-            </Stack>
+            </BlockStack>
           )}
         </div>
       </div>

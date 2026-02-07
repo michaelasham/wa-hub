@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Card, Text, Select, Stack, Collapsible, Badge, InlineCode, EmptyState } from '@shopify/polaris';
+import { Card, Text, Select, BlockStack, InlineStack, Collapsible, Badge, InlineCode, EmptyState } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 
 export function WebhooksPanel({
@@ -45,7 +45,7 @@ export function WebhooksPanel({
         <Text variant="headingMd" as="h2">
           Webhooks (live)
         </Text>
-        <Stack vertical spacing="tight">
+        <BlockStack gap="200">
           <Select
             label="Filter by event type"
             options={options}
@@ -54,11 +54,11 @@ export function WebhooksPanel({
           />
           <div style={{ maxHeight: '400px', overflow: 'auto' }}>
             {filtered.length === 0 ? (
-              <EmptyState heading="No webhook events">
+              <EmptyState image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png" heading="No webhook events">
                 <p>Webhook events will appear here when they are received.</p>
               </EmptyState>
             ) : (
-              <Stack vertical spacing="tight">
+              <BlockStack gap="200">
                 {filtered.map((ev, i) => {
                   const d = ev.data as {
                     event?: string;
@@ -92,21 +92,21 @@ export function WebhooksPanel({
                           justifyContent: 'space-between',
                         }}
                       >
-                        <Stack spacing="tight">
+                        <InlineStack gap="200">
                           <Text as="span" variant="bodyMd" fontWeight="semibold">
                             {d.event}
                           </Text>
-                          <Text as="span" variant="bodySm" color="subdued">
+                          <Text as="span" variant="bodySm" tone="subdued">
                             @ {d.timestamp}
                           </Text>
                           {d.signatureValid === true && (
-                            <Badge status="success">✓ sig</Badge>
+                            <Badge tone="success">✓ sig</Badge>
                           )}
                           {d.signatureValid === false && (
-                            <Badge status="critical">✗ sig invalid</Badge>
+                            <Badge tone="critical">✗ sig invalid</Badge>
                           )}
-                        </Stack>
-                        <Text as="span" variant="bodySm" color="subdued">
+                        </InlineStack>
+                        <Text as="span" variant="bodySm" tone="subdued">
                           {isOpen ? '▼' : '▶'}
                         </Text>
                       </button>
@@ -126,10 +126,10 @@ export function WebhooksPanel({
                     </div>
                   );
                 })}
-              </Stack>
+              </BlockStack>
             )}
           </div>
-        </Stack>
+        </BlockStack>
       </div>
     </Card>
   );

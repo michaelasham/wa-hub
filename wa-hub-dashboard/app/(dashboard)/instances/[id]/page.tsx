@@ -13,7 +13,7 @@ import {
   Layout,
   Card,
   Text,
-  Stack,
+  BlockStack,
 } from '@shopify/polaris';
 import { useSSE } from '@/hooks/useSSE';
 import { waHubRequest } from '@/lib/wahubClient';
@@ -119,7 +119,6 @@ export default function InstanceDetailPage() {
     >
       <Page
         title={id}
-        breadcrumbs={[{ content: 'Instances', url: '/' }]}
         primaryAction={{
           content: 'Delete Instance',
           destructive: true,
@@ -133,29 +132,29 @@ export default function InstanceDetailPage() {
         ]}
       >
         {!connected && (
-          <Banner status="warning" title="SSE Connection">
+          <Banner tone="warning" title="SSE Connection">
             <p>Server-Sent Events connection is not active. Real-time updates may not work.</p>
           </Banner>
         )}
 
         <Layout>
           <Layout.Section>
-            <Stack vertical spacing="loose">
+            <BlockStack gap="400">
               <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} />
               <StatusPollControl instanceId={id} />
               <QrPanel instanceId={id} events={events} />
-            </Stack>
+            </BlockStack>
           </Layout.Section>
           <Layout.Section>
-            <Stack vertical spacing="loose">
+            <BlockStack gap="400">
               <ActionsPanel instanceId={id} />
-            </Stack>
+            </BlockStack>
           </Layout.Section>
-          <Layout.Section fullWidth>
-            <Stack vertical spacing="loose">
+          <Layout.Section>
+            <BlockStack gap="400">
               <WebhooksPanel instanceId={id} events={events} />
               <LogsPanel instanceId={id} events={events} />
-            </Stack>
+            </BlockStack>
           </Layout.Section>
         </Layout>
       </Page>

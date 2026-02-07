@@ -6,7 +6,7 @@ import {
   Text,
   TextField,
   Button,
-  Stack,
+  BlockStack,
   Banner,
   Divider,
   InlineCode,
@@ -69,12 +69,12 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
         <Text variant="headingMd" as="h2">
           Actions
         </Text>
-        <Stack vertical spacing="loose">
+        <BlockStack gap="400">
           <div>
             <Text variant="headingSm" as="h3" fontWeight="semibold">
               Send Message
             </Text>
-            <Stack vertical spacing="tight">
+            <BlockStack gap="200">
               <TextField
                 label="Phone or chatId"
                 value={chatId}
@@ -90,10 +90,10 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
                 multiline={2}
                 autoComplete="off"
               />
-              <Button onClick={sendMessage} loading={loading} primary>
+              <Button onClick={sendMessage} loading={loading} variant="primary">
                 Send Message
               </Button>
-            </Stack>
+            </BlockStack>
           </div>
 
           <Divider />
@@ -102,7 +102,7 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
             <Text variant="headingSm" as="h3" fontWeight="semibold">
               Create Poll
             </Text>
-            <Stack vertical spacing="tight">
+            <BlockStack gap="200">
               <TextField
                 label="Phone or chatId"
                 value={chatId}
@@ -125,22 +125,22 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
                 helpText="Separate options with commas"
                 autoComplete="off"
               />
-              <Button onClick={createPoll} loading={loading} primary>
+              <Button onClick={createPoll} loading={loading} variant="primary">
                 Create Poll
               </Button>
-            </Stack>
+            </BlockStack>
           </div>
 
           <Divider />
 
           <div>
-            <Button onClick={logout} loading={loading} destructive>
+            <Button onClick={logout} loading={loading} tone="critical">
               Logout Instance
             </Button>
           </div>
 
           {result && (
-            <Banner status={result.ok ? 'success' : 'critical'} title={`Status: ${result.status}`}>
+            <Banner tone={result.ok ? 'success' : 'critical'} title={`Status: ${result.status}`}>
               <div style={{ marginTop: '0.5rem' }}>
                 <InlineCode>
                   <pre style={{ fontSize: '0.75rem', overflow: 'auto' }}>
@@ -150,7 +150,7 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
               </div>
             </Banner>
           )}
-        </Stack>
+        </BlockStack>
       </div>
     </Card>
   );

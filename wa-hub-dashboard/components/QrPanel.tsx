@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, Text, Button, Stack, Banner, Badge, Spinner } from '@shopify/polaris';
+import { Card, Text, Button, BlockStack, InlineStack, Banner, Badge, Spinner } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 
 export function QrPanel({
@@ -66,11 +66,11 @@ export function QrPanel({
   const getClassificationBadge = (classification: string) => {
     switch (classification) {
       case 'READY':
-        return <Badge status="success">{classification}</Badge>;
+        return <Badge tone="success">{classification}</Badge>;
       case 'INSTANCE_NOT_FOUND':
-        return <Badge status="critical">{classification}</Badge>;
+        return <Badge tone="critical">{classification}</Badge>;
       default:
-        return <Badge status="attention">{classification}</Badge>;
+        return <Badge tone="attention">{classification}</Badge>;
     }
   };
 
@@ -80,15 +80,15 @@ export function QrPanel({
         <Text variant="headingMd" as="h2">
           QR Code
         </Text>
-        <Stack vertical spacing="loose">
-          <Stack>
-            <Button onClick={startPolling} disabled={polling} primary>
+        <BlockStack gap="400">
+          <InlineStack gap="200">
+            <Button onClick={startPolling} disabled={polling} variant="primary">
               Start QR polling
             </Button>
             <Button onClick={stopPolling} disabled={!polling}>
               Stop polling
             </Button>
-          </Stack>
+          </InlineStack>
           {classification && (
             <div>
               <Text as="p" variant="bodyMd" fontWeight="semibold">
@@ -100,7 +100,7 @@ export function QrPanel({
             </div>
           )}
           {error && (
-            <Banner status="critical">
+            <Banner tone="critical">
               <p>{error}</p>
             </Banner>
           )}
@@ -121,13 +121,13 @@ export function QrPanel({
             <div style={{ textAlign: 'center' }}>
               <Spinner accessibilityLabel="Polling for QR code" size="small" />
               <div style={{ marginTop: '0.5rem' }}>
-                <Text as="p" variant="bodySm" color="subdued">
+                <Text as="p" variant="bodySm" tone="subdued">
                   Polling... (wait for QR or max attempts)
                 </Text>
               </div>
             </div>
           )}
-        </Stack>
+        </BlockStack>
       </div>
     </Card>
   );
