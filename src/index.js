@@ -4,6 +4,7 @@
  */
 
 const express = require('express');
+const os = require('os');
 const config = require('./config');
 const router = require('./router');
 const { authenticateApiKey } = require('./auth');
@@ -24,7 +25,16 @@ app.use((req, res, next) => {
 
 // Health check endpoint (no authentication required)
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'wa-hub' });
+  const loadavg = os.loadavg();
+  const cpuCount = os.cpus().length;
+  const cpuPercent = cpuCount > 0 ? Math.min(100, (loadavg[0] / cpuCount) * 100) : 0;
+  res.json({
+    status: 'ok',
+    service: 'wa-hub',
+    instanceCount: instanceManager.getInstanceCount ? instanceManager.getInstanceCount() : 0,
+    cpuPercent: Math.round(cpuPercent * 10) / 10,
+    loadavg: loadavg.map((l) => Math.round(l * 100) / 100),
+  });
 });
 
 // API key authentication (applied to all routes after this point)
