@@ -8,17 +8,12 @@ import {
   TopBar,
   Navigation,
   Banner,
-  Badge,
-  Button,
   Layout,
-  Card,
-  Text,
   BlockStack,
 } from '@shopify/polaris';
 import { useSSE } from '@/hooks/useSSE';
 import { waHubRequest } from '@/lib/wahubClient';
 import { ConnectionPanel } from '@/components/ConnectionPanel';
-import { StatusPollControl } from '@/components/StatusPollControl';
 import { QrPanel } from '@/components/QrPanel';
 import { ActionsPanel } from '@/components/ActionsPanel';
 import { WebhooksPanel } from '@/components/WebhooksPanel';
@@ -50,13 +45,18 @@ export default function InstanceDetailPage() {
     return () => { cancelled = true; };
   }, [id]);
 
-  // Update status from SSE
-  useEffect(() => {
-    const ev = events.find((e) => e.type === 'status' && (e.data as { instanceId?: string }).instanceId === id);
-    if (ev) {
-      setStatus((ev.data as { status: Record<string, unknown> }).status as Record<string, unknown>);
+  const handleRefresh = useCallback(async () => {
+    setLoading(true);
+    const res = await waHubRequest<{ clientStatus?: unknown }>({
+      method: 'GET',
+      path: `/instances/${id}/client/status`,
+    });
+    if (res.ok && res.data) {
+      const data = res.data as { clientStatus?: unknown };
+      setStatus((data.clientStatus as Record<string, unknown>) ?? (data as Record<string, unknown>));
     }
-  }, [events, id]);
+    setLoading(false);
+  }, [id]);
 
   const handleDelete = async () => {
     if (!confirm('Delete this instance?')) return;
@@ -140,8 +140,7 @@ export default function InstanceDetailPage() {
         <Layout>
           <Layout.Section>
             <BlockStack gap="400">
-              <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} />
-              <StatusPollControl instanceId={id} />
+              <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} onRefresh={handleRefresh} />
               <QrPanel instanceId={id} events={events} />
             </BlockStack>
           </Layout.Section>

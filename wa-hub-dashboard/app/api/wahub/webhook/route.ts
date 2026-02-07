@@ -42,10 +42,25 @@ export async function POST(request: NextRequest) {
     if (rank !== null) {
       updates.lifecycleRank = rank;
     }
+    if (event === 'qr' && payload.data && typeof (payload.data as { qr?: string }).qr === 'string') {
+      updates.lastQrBase64 = (payload.data as { qr: string }).qr;
+    }
     setInstanceMeta(instanceId, updates);
   }
 
   broadcastSse({ type: 'webhook', data: webhookEvent });
+
+  // Broadcast qr/status for UI panels that use webhooks (not polling)
+  if (instanceId && event === 'qr' && payload.data && typeof (payload.data as { qr?: string }).qr === 'string') {
+    broadcastSse({
+      type: 'qr',
+      data: {
+        instanceId,
+        qr: (payload.data as { qr: string }).qr,
+        classification: 'READY',
+      },
+    });
+  }
 
   return NextResponse.json({ ok: true });
 }

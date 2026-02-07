@@ -1,6 +1,6 @@
 'use client';
 
-import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode } from '@shopify/polaris';
+import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode, InlineStack, Button } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 import { useState } from 'react';
 
@@ -27,6 +27,19 @@ export function ConnectionPanel({
     (e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === instanceId
   );
   const lastWebhook = webhooks[0]?.data as { event?: string; timestamp?: string } | undefined;
+  const initEv = events.find((e) => e.type === 'initial');
+  const instanceMeta = initEv
+    ? (initEv.data as { instanceMeta?: { waStatus?: string | null } }).instanceMeta
+    : null;
+
+  // Webhook-driven status (primary); fallback to instance meta; then one-time fetch
+  const displayStatus =
+    lastWebhook?.event ??
+    instanceMeta?.waStatus ??
+    (status?.instanceStatus as string) ??
+    (status?.state as string) ??
+    'unknown';
+
   const rank =
     lastWebhook?.event === 'ready'
       ? 3
@@ -54,9 +67,16 @@ export function ConnectionPanel({
   return (
     <Card>
       <div style={{ padding: '1rem' }}>
-        <Text variant="headingMd" as="h2">
-          Connection Status
-        </Text>
+        <InlineStack align="space-between" blockAlign="center" gap="200">
+          <Text variant="headingMd" as="h2">
+            Connection Status
+          </Text>
+          {onRefresh && (
+            <Button variant="plain" size="slim" onClick={onRefresh} disabled={loading}>
+              Refresh
+            </Button>
+          )}
+        </InlineStack>
         {loading ? (
           <div style={{ marginTop: '1rem', textAlign: 'center' }}>
             <Spinner accessibilityLabel="Loading connection status" size="small" />
@@ -65,11 +85,9 @@ export function ConnectionPanel({
           <BlockStack gap="200">
             <div>
               <Text as="p" variant="bodyMd" fontWeight="semibold">
-                wa-hub status:
+                Status (webhook-driven):
               </Text>
-              <InlineCode>
-                {String(status?.instanceStatus ?? status?.state ?? 'unknown')}
-              </InlineCode>
+              <InlineCode>{String(displayStatus)}</InlineCode>
             </div>
             <div>
               <Text as="p" variant="bodyMd" fontWeight="semibold">

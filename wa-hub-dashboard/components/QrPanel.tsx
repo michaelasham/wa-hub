@@ -1,9 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Card, Text, Button, BlockStack, InlineStack, Banner, Badge, Spinner } from '@shopify/polaris';
+import { useMemo } from 'react';
+import { Card, Text, BlockStack, Badge, Banner } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 
+/**
+ * QR Panel - webhook-driven. Wa-hub sends qr events via webhook; no polling.
+ */
 export function QrPanel({
   instanceId,
   events,
@@ -11,68 +14,35 @@ export function QrPanel({
   instanceId: string;
   events: SseEvent[];
 }) {
-  const [polling, setPolling] = useState(false);
-  const [qr, setQr] = useState<string | null>(null);
-  const [classification, setClassification] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [attempts, setAttempts] = useState(0);
-
-  useEffect(() => {
-    const ev = events.find(
-      (e) => e.type === 'qr' && (e.data as { instanceId?: string }).instanceId === instanceId
-    );
-    if (ev) {
-      const d = ev.data as { qr?: string; classification?: string; error?: string };
-      setQr(d.qr ?? null);
-      setClassification(d.classification ?? null);
-      setError(d.error ?? null);
-    }
-  }, [events, instanceId]);
-
-  useEffect(() => {
-    const ev = events.find(
+  const qr = useMemo(() => {
+    // Prefer explicit 'qr' broadcast (from webhook handler)
+    const qrEv = events.find(
       (e) =>
-        e.type === 'polling' &&
-        (e.data as { instanceId?: string; type?: string }).instanceId === instanceId &&
-        (e.data as { type?: string }).type === 'qr'
+        e.type === 'qr' && (e.data as { instanceId?: string }).instanceId === instanceId
     );
-    if (ev) {
-      const d = ev.data as { state?: string };
-      setPolling(d.state === 'started');
+    if (qrEv) {
+      const d = qrEv.data as { qr?: string };
+      return d.qr ?? null;
     }
+    // Fallback: webhook event with qr payload
+    const webhookEv = events.find(
+      (e) =>
+        e.type === 'webhook' &&
+        (e.data as { instanceId?: string }).instanceId === instanceId &&
+        (e.data as { event?: string }).event === 'qr'
+    );
+    if (webhookEv) {
+      const payload = (webhookEv.data as { payload?: { data?: { qr?: string } } }).payload;
+      return payload?.data?.qr ?? null;
+    }
+    // Fallback: instance meta from initial payload (webhook arrived before SSE connect)
+    const initEv = events.find((e) => e.type === 'initial');
+    if (initEv) {
+      const meta = (initEv.data as { instanceMeta?: { lastQrBase64?: string | null } }).instanceMeta;
+      if (meta?.lastQrBase64) return meta.lastQrBase64;
+    }
+    return null;
   }, [events, instanceId]);
-
-  const startPolling = async () => {
-    setPolling(true);
-    setQr(null);
-    setError(null);
-    setAttempts(0);
-    await fetch(`/api/instances/${encodeURIComponent(instanceId)}/poll/start`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'qr' }),
-    });
-  };
-
-  const stopPolling = async () => {
-    setPolling(false);
-    await fetch(`/api/instances/${encodeURIComponent(instanceId)}/poll/stop`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'qr' }),
-    });
-  };
-
-  const getClassificationBadge = (classification: string) => {
-    switch (classification) {
-      case 'READY':
-        return <Badge tone="success">{classification}</Badge>;
-      case 'INSTANCE_NOT_FOUND':
-        return <Badge tone="critical">{classification}</Badge>;
-      default:
-        return <Badge tone="attention">{classification}</Badge>;
-    }
-  };
 
   return (
     <Card>
@@ -81,27 +51,13 @@ export function QrPanel({
           QR Code
         </Text>
         <BlockStack gap="400">
-          <InlineStack gap="200">
-            <Button onClick={startPolling} disabled={polling} variant="primary">
-              Start QR polling
-            </Button>
-            <Button onClick={stopPolling} disabled={!polling}>
-              Stop polling
-            </Button>
-          </InlineStack>
-          {classification && (
-            <div>
-              <Text as="p" variant="bodyMd" fontWeight="semibold">
-                Classification:
-              </Text>
-              <div style={{ marginTop: '0.5rem' }}>
-                {getClassificationBadge(classification)}
-              </div>
-            </div>
-          )}
-          {error && (
-            <Banner tone="critical">
-              <p>{error}</p>
+          <Badge tone="info">Webhook-driven (no polling)</Badge>
+          {!qr && (
+            <Banner tone="info">
+              <p>
+                QR will appear when wa-hub sends a qr webhook. Ensure the instance webhook URL
+                points to this dashboard and the instance is in needs_qr state.
+              </p>
             </Banner>
           )}
           {qr && (
@@ -115,16 +71,6 @@ export function QrPanel({
                   border: '1px solid var(--p-color-border-subdued)',
                 }}
               />
-            </div>
-          )}
-          {polling && !qr && (
-            <div style={{ textAlign: 'center' }}>
-              <Spinner accessibilityLabel="Polling for QR code" size="small" />
-              <div style={{ marginTop: '0.5rem' }}>
-                <Text as="p" variant="bodySm" tone="subdued">
-                  Polling... (wait for QR or max attempts)
-                </Text>
-              </div>
             </div>
           )}
         </BlockStack>

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { subscribeSse, getWebhookEvents, getApiLogs } from '@/lib/store';
+import { subscribeSse, getWebhookEvents, getApiLogs, getInstanceMeta } from '@/lib/store';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -24,7 +24,14 @@ export async function GET(request: NextRequest) {
       });
 
       send({ type: 'connected', data: { instanceId } });
-      send({ type: 'initial', data: { webhookEvents: getWebhookEvents(instanceId ?? undefined), apiLogs: getApiLogs(instanceId ?? undefined) } });
+      send({
+        type: 'initial',
+        data: {
+          webhookEvents: getWebhookEvents(instanceId ?? undefined),
+          apiLogs: getApiLogs(instanceId ?? undefined),
+          instanceMeta: instanceId ? getInstanceMeta(instanceId) : null,
+        },
+      });
 
       request.signal.addEventListener('abort', () => {
         unsub();
