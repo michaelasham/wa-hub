@@ -1,16 +1,19 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { isAuthEnabled, verifySessionCookie } from './lib/auth-edge';
+import { isAuthEnabled } from './lib/auth-edge';
 
 const COOKIE_NAME = 'wa-hub-dashboard-session';
 
 const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/check', '/api/wahub/webhook'];
-const API_AUTH_PATHS = ['/api/auth/login', '/api/auth/logout', '/api/wahub/webhook'];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
 }
 
+/**
+ * Middleware only checks cookie existence. Session verification runs in Node (layout)
+ * so DASHBOARD_SESSION_SECRET is available at runtime (Edge gets env at build time).
+ */
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -27,15 +30,6 @@ export async function middleware(request: NextRequest) {
     const loginUrl = new URL('/login', request.url);
     loginUrl.searchParams.set('from', pathname);
     return NextResponse.redirect(loginUrl);
-  }
-
-  const valid = await verifySessionCookie(cookie);
-  if (!valid) {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('from', pathname);
-    const res = NextResponse.redirect(loginUrl);
-    res.cookies.delete(COOKIE_NAME);
-    return res;
   }
 
   return NextResponse.next();
