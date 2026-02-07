@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { Card, Text, Button, Stack, Banner, Badge, Spinner } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 
 export function QrPanel({
@@ -62,58 +63,72 @@ export function QrPanel({
     });
   };
 
+  const getClassificationBadge = (classification: string) => {
+    switch (classification) {
+      case 'READY':
+        return <Badge status="success">{classification}</Badge>;
+      case 'INSTANCE_NOT_FOUND':
+        return <Badge status="critical">{classification}</Badge>;
+      default:
+        return <Badge status="attention">{classification}</Badge>;
+    }
+  };
+
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4 shadow">
-      <h2 className="mb-4 text-lg font-semibold">QR Code</h2>
-      <div className="space-y-4">
-        <div className="flex gap-2">
-          <button
-            onClick={startPolling}
-            disabled={polling}
-            className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            Start QR polling
-          </button>
-          <button
-            onClick={stopPolling}
-            disabled={!polling}
-            className="rounded bg-gray-200 px-4 py-2 text-sm hover:bg-gray-300 disabled:opacity-50"
-          >
-            Stop polling
-          </button>
-        </div>
-        {classification && (
-          <p className="text-sm">
-            Classification:{' '}
-            <span
-              className={
-                classification === 'READY'
-                  ? 'text-green-600'
-                  : classification === 'INSTANCE_NOT_FOUND'
-                  ? 'text-red-600'
-                  : 'text-yellow-600'
-              }
-            >
-              {classification}
-            </span>
-          </p>
-        )}
-        {error && (
-          <p className="text-sm text-red-600">{error}</p>
-        )}
-        {qr && (
-          <div>
-            <img
-              src={qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`}
-              alt="QR"
-              className="mx-auto max-h-64 rounded border"
-            />
-          </div>
-        )}
-        {polling && !qr && (
-          <p className="text-sm text-gray-500">Polling... (wait for QR or max attempts)</p>
-        )}
+    <Card>
+      <div style={{ padding: '1rem' }}>
+        <Text variant="headingMd" as="h2">
+          QR Code
+        </Text>
+        <Stack vertical spacing="loose">
+          <Stack>
+            <Button onClick={startPolling} disabled={polling} primary>
+              Start QR polling
+            </Button>
+            <Button onClick={stopPolling} disabled={!polling}>
+              Stop polling
+            </Button>
+          </Stack>
+          {classification && (
+            <div>
+              <Text as="p" variant="bodyMd" fontWeight="semibold">
+                Classification:
+              </Text>
+              <div style={{ marginTop: '0.5rem' }}>
+                {getClassificationBadge(classification)}
+              </div>
+            </div>
+          )}
+          {error && (
+            <Banner status="critical">
+              <p>{error}</p>
+            </Banner>
+          )}
+          {qr && (
+            <div style={{ textAlign: 'center' }}>
+              <img
+                src={qr.startsWith('data:') ? qr : `data:image/png;base64,${qr}`}
+                alt="QR Code"
+                style={{
+                  maxHeight: '256px',
+                  borderRadius: '0.5rem',
+                  border: '1px solid var(--p-color-border-subdued)',
+                }}
+              />
+            </div>
+          )}
+          {polling && !qr && (
+            <div style={{ textAlign: 'center' }}>
+              <Spinner accessibilityLabel="Polling for QR code" size="small" />
+              <div style={{ marginTop: '0.5rem' }}>
+                <Text as="p" variant="bodySm" color="subdued">
+                  Polling... (wait for QR or max attempts)
+                </Text>
+              </div>
+            </div>
+          )}
+        </Stack>
       </div>
-    </div>
+    </Card>
   );
 }

@@ -1,8 +1,20 @@
 'use client';
 
 import { useParams, useRouter } from 'next/navigation';
-import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
+import {
+  Page,
+  Frame,
+  TopBar,
+  Navigation,
+  Banner,
+  Badge,
+  Button,
+  Layout,
+  Card,
+  Text,
+  Stack,
+} from '@shopify/polaris';
 import { useSSE } from '@/hooks/useSSE';
 import { waHubRequest } from '@/lib/wahubClient';
 import { ConnectionPanel } from '@/components/ConnectionPanel';
@@ -19,6 +31,8 @@ export default function InstanceDetailPage() {
   const { events, connected } = useSSE(id);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [userMenuActive, setUserMenuActive] = useState(false);
+  const [navigationActive, setNavigationActive] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,46 +71,94 @@ export default function InstanceDetailPage() {
     router.push('/login');
   };
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="mx-auto max-w-7xl">
-        <header className="mb-6 flex items-center justify-between">
-          <div>
-            <Link href="/" className="text-blue-600 hover:underline">
-              ← Instances
-            </Link>
-            <h1 className="mt-2 text-2xl font-bold">{id}</h1>
-          </div>
-          <div className="flex items-center gap-4">
-            <span
-              className={`text-sm ${connected ? 'text-green-600' : 'text-gray-400'}`}
-            >
-              SSE {connected ? '●' : '○'}
-            </span>
-            <button
-              onClick={handleLogout}
-              className="rounded bg-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-300"
-            >
-              Logout
-            </button>
-            <button
-              onClick={handleDelete}
-              className="rounded bg-red-100 px-4 py-2 text-sm text-red-700 hover:bg-red-200"
-            >
-              Delete Instance
-            </button>
-          </div>
-        </header>
+  const toggleUserMenu = useCallback(() => setUserMenuActive((userMenuActive) => !userMenuActive), []);
+  const toggleNavigation = useCallback(() => setNavigationActive((navigationActive) => !navigationActive), []);
 
-        <div className="grid gap-6 lg:grid-cols-2">
-          <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} />
-          <StatusPollControl instanceId={id} />
-          <QrPanel instanceId={id} events={events} />
-          <ActionsPanel instanceId={id} />
-          <WebhooksPanel instanceId={id} events={events} />
-          <LogsPanel instanceId={id} events={events} />
-        </div>
-      </div>
-    </div>
+  const userMenuActions = [
+    {
+      items: [{ content: 'Logout', onAction: handleLogout }],
+    },
+  ];
+
+  const navigationMarkup = (
+    <Navigation location="/">
+      <Navigation.Section
+        items={[
+          {
+            label: 'All Instances',
+            url: '/',
+            exactMatch: true,
+          },
+        ]}
+      />
+    </Navigation>
+  );
+
+  const topBarMarkup = (
+    <TopBar
+      showNavigationToggle
+      userMenu={
+        <TopBar.UserMenu
+          actions={userMenuActions}
+          name="Admin"
+          initials="A"
+          open={userMenuActive}
+          onToggle={toggleUserMenu}
+        />
+      }
+      onNavigationToggle={toggleNavigation}
+    />
+  );
+
+  return (
+    <Frame
+      topBar={topBarMarkup}
+      navigation={navigationMarkup}
+      showMobileNavigation={navigationActive}
+      onNavigationDismiss={toggleNavigation}
+    >
+      <Page
+        title={id}
+        breadcrumbs={[{ content: 'Instances', url: '/' }]}
+        primaryAction={{
+          content: 'Delete Instance',
+          destructive: true,
+          onAction: handleDelete,
+        }}
+        secondaryActions={[
+          {
+            content: connected ? 'SSE Connected' : 'SSE Disconnected',
+            disabled: true,
+          },
+        ]}
+      >
+        {!connected && (
+          <Banner status="warning" title="SSE Connection">
+            <p>Server-Sent Events connection is not active. Real-time updates may not work.</p>
+          </Banner>
+        )}
+
+        <Layout>
+          <Layout.Section>
+            <Stack vertical spacing="loose">
+              <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} />
+              <StatusPollControl instanceId={id} />
+              <QrPanel instanceId={id} events={events} />
+            </Stack>
+          </Layout.Section>
+          <Layout.Section>
+            <Stack vertical spacing="loose">
+              <ActionsPanel instanceId={id} />
+            </Stack>
+          </Layout.Section>
+          <Layout.Section fullWidth>
+            <Stack vertical spacing="loose">
+              <WebhooksPanel instanceId={id} events={events} />
+              <LogsPanel instanceId={id} events={events} />
+            </Stack>
+          </Layout.Section>
+        </Layout>
+      </Page>
+    </Frame>
   );
 }

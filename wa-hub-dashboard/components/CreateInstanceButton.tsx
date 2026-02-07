@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { Button, Modal, TextField, Banner, Text } from '@shopify/polaris';
 import { waHubRequest } from '@/lib/wahubClient';
 
 function shopDomainToInstanceName(domain: string): string {
@@ -18,8 +19,7 @@ export function CreateInstanceButton({ onCreated }: { onCreated?: () => void }) 
 
   const instanceName = shopDomain ? shopDomainToInstanceName(shopDomain) : '';
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async () => {
     if (!instanceName) {
       setError('Enter a shop domain (e.g. blesscurls.myshopify.com)');
       return;
@@ -67,55 +67,54 @@ export function CreateInstanceButton({ onCreated }: { onCreated?: () => void }) 
 
   return (
     <>
-      <button
+      <Button
+        primary
         onClick={() => setOpen(true)}
-        className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        data-create-instance
       >
         Create Instance
-      </button>
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
-            <h2 className="mb-4 text-lg font-semibold">Create Instance</h2>
-            <form onSubmit={handleSubmit}>
-              <label className="mb-2 block text-sm font-medium text-gray-700">
-                Shop domain or instance name
-              </label>
-              <input
-                type="text"
-                value={shopDomain}
-                onChange={(e) => setShopDomain(e.target.value)}
-                placeholder="blesscurls.myshopify.com"
-                className="mb-2 w-full rounded border border-gray-300 px-3 py-2"
-              />
-              {instanceName && (
-                <p className="mb-4 text-xs text-gray-500">
-                  Instance name: {instanceName}
-                </p>
-              )}
-              {error && (
-                <p className="mb-4 text-sm text-red-600">{error}</p>
-              )}
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setOpen(false)}
-                  className="rounded bg-gray-200 px-4 py-2 hover:bg-gray-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading || !instanceName}
-                  className="rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {loading ? 'Creating...' : 'Create'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      </Button>
+      <Modal
+        open={open}
+        onClose={() => {
+          setOpen(false);
+          setError(null);
+        }}
+        title="Create WhatsApp Instance"
+        primaryAction={{
+          content: 'Create',
+          onAction: handleSubmit,
+          loading,
+          disabled: !instanceName,
+        }}
+        secondaryActions={[
+          {
+            content: 'Cancel',
+            onAction: () => {
+              setOpen(false);
+              setError(null);
+            },
+          },
+        ]}
+      >
+        <Modal.Section>
+          <TextField
+            label="Shop domain or instance name"
+            value={shopDomain}
+            onChange={setShopDomain}
+            placeholder="blesscurls.myshopify.com"
+            helpText={instanceName ? `Instance name: ${instanceName}` : undefined}
+            autoComplete="off"
+          />
+          {error && (
+            <div style={{ marginTop: '1rem' }}>
+              <Banner status="critical">
+                <p>{error}</p>
+              </Banner>
+            </div>
+          )}
+        </Modal.Section>
+      </Modal>
     </>
   );
 }

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { Card, Text, Button, Stack } from '@shopify/polaris';
 
 export function StatusPollControl({ instanceId }: { instanceId: string }) {
   const [polling, setPolling] = useState(false);
@@ -37,27 +38,25 @@ export function StatusPollControl({ instanceId }: { instanceId: string }) {
   };
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4 shadow">
-      <h2 className="mb-4 text-lg font-semibold">Status Polling</h2>
-      <div className="flex gap-2">
-        <button
-          onClick={start}
-          disabled={polling}
-          className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          Start status poll
-        </button>
-        <button
-          onClick={stop}
-          disabled={!polling}
-          className="rounded bg-gray-200 px-4 py-2 text-sm hover:bg-gray-300 disabled:opacity-50"
-        >
-          Stop
-        </button>
+    <Card>
+      <div style={{ padding: '1rem' }}>
+        <Text variant="headingMd" as="h2">
+          Status Polling
+        </Text>
+        <Stack vertical spacing="tight">
+          <Stack>
+            <Button onClick={start} disabled={polling} primary>
+              Start status poll
+            </Button>
+            <Button onClick={stop} disabled={!polling}>
+              Stop
+            </Button>
+          </Stack>
+          <Text as="p" variant="bodySm" color="subdued">
+            {polling ? 'Polling /client/status every 3s' : 'Stopped'}
+          </Text>
+        </Stack>
       </div>
-      <p className="mt-2 text-sm text-gray-500">
-        {polling ? 'Polling /client/status every 3s' : 'Stopped'}
-      </p>
-    </div>
+    </Card>
   );
 }
