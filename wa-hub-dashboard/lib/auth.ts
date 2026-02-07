@@ -18,15 +18,17 @@ function sign(value: string, secret: string): string {
 }
 
 export function isAuthEnabled(): boolean {
-  return !!(process.env.DASHBOARD_PASSWORD && process.env.DASHBOARD_PASSWORD.length > 0);
+  const pwd = process.env.DASHBOARD_PASSWORD?.trim();
+  return !!(pwd && pwd.length > 0);
 }
 
 export function checkPassword(password: string): boolean {
-  const expected = process.env.DASHBOARD_PASSWORD;
+  const expected = process.env.DASHBOARD_PASSWORD?.trim();
   if (!expected) return true; // auth disabled
-  if (password.length !== expected.length) return false;
+  const pwd = password.trim();
+  if (pwd.length !== expected.length) return false;
   return crypto.timingSafeEqual(
-    Buffer.from(password, 'utf8'),
+    Buffer.from(pwd, 'utf8'),
     Buffer.from(expected, 'utf8')
   );
 }
