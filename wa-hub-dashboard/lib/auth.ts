@@ -62,9 +62,12 @@ export async function validateSession(): Promise<boolean> {
 
 export async function setSessionCookie(token: string): Promise<void> {
   const cookieStore = await cookies();
+  const secure =
+    process.env.DASHBOARD_SECURE_COOKIES === 'true' ||
+    (process.env.DASHBOARD_SECURE_COOKIES !== 'false' && process.env.NODE_ENV === 'production');
   cookieStore.set(COOKIE_NAME, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure,
     sameSite: 'lax',
     maxAge: SESSION_MAX_AGE,
     path: '/',
