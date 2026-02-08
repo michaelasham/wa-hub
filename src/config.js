@@ -73,6 +73,9 @@ const config = {
   // Debug patch: watchdog timeout for ready event (ms) - emit ready_timeout if not ready within this
   readyWatchdogMs: parseInt(process.env.READY_WATCHDOG_MS || '600000', 10), // 10 min default
 
+  // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
+  readyPollIntervalMs: parseInt(process.env.READY_POLL_INTERVAL_MS || '15000', 10), // 15 sec default
+
   // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
   connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
   connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '3', 10), // After this many, move to ERROR

@@ -113,6 +113,8 @@ class InstanceContext {
     this.readyWatchdogStartAt = null;
     this.readyWatchdogRestarted = false; // Only restart once on timeout
     this.authenticatedAt = null; // For measuring authenticated -> ready duration
+    // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
+    this.readyPollTimer = null;
 
     // Diagnostic: last webhook delivery
     this.lastWebhookEvent = null;
@@ -334,6 +336,16 @@ class InstanceContext {
   }
 
   /**
+   * Fallback: clear ready poll (client.info check when ready event never fires)
+   */
+  clearReadyPoll() {
+    if (this.readyPollTimer) {
+      clearInterval(this.readyPollTimer);
+      this.readyPollTimer = null;
+    }
+  }
+
+  /**
    * Debug patch: start ready watchdog (call on qr/authenticated)
    */
   startReadyWatchdog() {
@@ -415,6 +427,7 @@ async function onReadyWatchdogTimeout(instanceId) {
   if (!instance.readyWatchdogRestarted) {
     instance.readyWatchdogRestarted = true;
     instance.clearReadyWatchdog();
+    instance.clearReadyPoll();
     console.log(`[${instanceId}] ready_timeout: restarting client once`);
     try {
       if (instance.client) {
@@ -766,7 +779,28 @@ function setupEventListeners(instanceId, client) {
     });
   });
   
-  // Authenticated event - state stays CONNECTING until ready
+  // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
+  function startReadyPoll() {
+    instance.clearReadyPoll();
+    instance.readyPollTimer = setInterval(() => {
+      if (!instances.has(instanceId) || instance.state === InstanceState.READY) {
+        instance.clearReadyPoll();
+        return;
+      }
+      try {
+        const info = client.info;
+        if (info) {
+          console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info present, treating as ready`);
+          instance.clearReadyPoll();
+          doReadyTransition();
+        }
+      } catch {
+        // client.info not yet available
+      }
+    }, config.readyPollIntervalMs);
+  }
+
+  // Authenticated event - transition from NEEDS_QR to CONNECTING (syncing) until ready
   client.on('authenticated', () => {
     if (guard()) return;
     const ts = new Date().toISOString();
@@ -776,16 +810,22 @@ function setupEventListeners(instanceId, client) {
     debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
     console.log(`[${ts}] [${instanceId}] Event: authenticated`);
     instance.lastEvent = 'authenticated';
+    if (instance.state === InstanceState.NEEDS_QR) {
+      instance.transitionTo(InstanceState.CONNECTING, 'authenticated, syncing');
+    }
     instance.clearConnectingWatchdog();
     instance.connectingWatchdogRestartCount = 0; // Progress: authenticated
     instance.startReadyWatchdog();
+    startReadyPoll();
     void forwardWebhook(instanceId, 'authenticated', {}).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
-  client.on('ready', () => {
-    if (guard()) return;
+  // Shared: perform ready transition (used by ready event and ready-poll fallback)
+  function doReadyTransition() {
+    if (guard() || instance.state === InstanceState.READY) return;
     const ts = new Date().toISOString();
+    instance.clearReadyWatchdog();
+    instance.clearReadyPoll();
     debugLog(instanceId, 'ready', {
       authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
       authenticatedToReadyMs: instance.authenticatedAt ? Date.now() - instance.authenticatedAt.getTime() : null,
@@ -806,6 +846,12 @@ function setupEventListeners(instanceId, client) {
     instance.transitionTo(InstanceState.READY);
     void forwardWebhook(instanceId, 'ready', { status: 'ready' }).catch(err => recordWebhookError(instanceId, err));
     startSendLoop(instanceId);
+  }
+
+  // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
+  client.on('ready', () => {
+    if (guard()) return;
+    doReadyTransition();
   });
   
   // Auth failure - state transition FIRST, webhook fire-and-forget
@@ -820,6 +866,7 @@ function setupEventListeners(instanceId, client) {
     instance.lastError = String(msg);
     instance.lastErrorAt = new Date();
     instance.clearReadyWatchdog();
+    instance.clearReadyPoll();
     instance.clearConnectingWatchdog();
     instance.transitionTo(InstanceState.NEEDS_QR, `Auth failure: ${msg}`);
     void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(err => recordWebhookError(instanceId, err));
@@ -838,6 +885,7 @@ function setupEventListeners(instanceId, client) {
     instance.lastEvent = 'disconnected';
     instance.recordDisconnect();
     instance.clearReadyWatchdog();
+    instance.clearReadyPoll();
     stopSendLoop(instanceId);
     const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
     const reasonUpper = reasonStr.toUpperCase();
@@ -1704,6 +1752,9 @@ async function deleteInstance(instanceId) {
   }
   
   console.log(`[${instanceId}] Deleting instance`);
+
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
 
   const client = instance.client;
   // Remove from map first so event handlers no-op on any late events during destroy

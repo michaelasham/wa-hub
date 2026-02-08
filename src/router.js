@@ -292,6 +292,49 @@ router.get('/instances/:id/client/status', async (req, res) => {
 });
 
 /**
+ * GET /instances/:id/client/info-raw
+ * Debug: get raw client.info regardless of state (proves ready-poll fallback concept)
+ */
+router.get('/instances/:id/client/info-raw', async (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
+      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
+    }
+
+    let info = null;
+    let error = null;
+    try {
+      if (instance.client) {
+        info = instance.client.info;
+      }
+    } catch (e) {
+      error = e.message;
+    }
+
+    res.json(createSuccessResponse({
+      instanceState: instance.state,
+      clientExists: !!instance.client,
+      clientInfoPresent: !!info,
+      clientInfo: info ? {
+        pushname: info.pushname,
+        wid: info.wid ? { user: info.wid.user, _serialized: info.wid._serialized } : null,
+      } : null,
+      error: error,
+    }));
+  } catch (error) {
+    console.error('Error getting raw client info:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
  * GET /instances/:id/client/me
  * Get client details (connected user info)
  */
