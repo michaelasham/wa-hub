@@ -22,8 +22,12 @@ export async function POST(request: NextRequest) {
 
   const event = payload.event ?? 'unknown';
   const instanceId = payload.instanceId ?? null;
-  const rank = lifecycleRankFromEvent(event);
-  const summary = `${event}${instanceId ? ` @ ${instanceId}` : ''}`;
+  const data = payload.data as { status?: string } | undefined;
+  const rank = lifecycleRankFromEvent(event, data);
+  const summary =
+    event === 'change_state' && data?.status
+      ? `${event}:${data.status}${instanceId ? ` @ ${instanceId}` : ''}`
+      : `${event}${instanceId ? ` @ ${instanceId}` : ''}`;
 
   const webhookEvent = addWebhookEvent({
     timestamp: new Date().toISOString(),
@@ -35,9 +39,11 @@ export async function POST(request: NextRequest) {
   });
 
   if (instanceId) {
+    const waStatus =
+      event === 'change_state' && data?.status ? `change_state:${data.status}` : event;
     const updates: Parameters<typeof setInstanceMeta>[1] = {
       lastEventAt: webhookEvent.timestamp,
-      waStatus: event,
+      waStatus,
     };
     if (rank !== null) {
       updates.lifecycleRank = rank;

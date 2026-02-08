@@ -45,6 +45,8 @@ router.get('/instances', (req, res) => {
       name: inst.name,
       status: mapInstanceStateToStatus(inst.state),
       phoneNumber: inst.phoneNumber || undefined,
+      webhookUrl: inst.webhookUrl || null,
+      webhookEvents: inst.webhookEvents || [],
     }));
 
     res.json(instances);

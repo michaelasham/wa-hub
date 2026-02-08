@@ -967,6 +967,7 @@ function setupEventListeners(instanceId, client) {
   // Message - fire-and-forget webhook (never block lifecycle)
   client.on('message', (message) => {
     if (guard()) return;
+    console.log(`[${instanceId}] Received message event (from: ${extractPhoneNumber(message.from)}, type: ${message.type || 'text'})`);
     const messageData = {
       message: {
         from: extractPhoneNumber(message.from),
@@ -983,10 +984,13 @@ function setupEventListeners(instanceId, client) {
   // Vote update - fire-and-forget webhook (never block lifecycle)
   client.on('vote_update', (vote) => {
     if (guard()) return;
+    const voter = extractPhoneNumber(vote.voter || vote.from || vote.chatId);
+    const options = vote.selectedOptions || vote.selected_options || vote.options || [];
+    console.log(`[${instanceId}] Received vote_update event (voter: ${voter}, options: ${JSON.stringify(options)})`);
     const voteData = {
       vote: {
-        voter: extractPhoneNumber(vote.voter || vote.from || vote.chatId),
-        selectedOptions: vote.selectedOptions || vote.selected_options || vote.options || [],
+        voter,
+        selectedOptions: options,
         timestamp: vote.timestamp || vote.interractedAtTs || Date.now(),
         pollMessageId:
           (vote.parentMsgKey && (vote.parentMsgKey._serialized || vote.parentMsgKey.id || vote.parentMsgKey._serialized)) ||

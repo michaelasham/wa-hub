@@ -156,7 +156,10 @@ export function broadcastSse(event: SseEvent): void {
   });
 }
 
-export function lifecycleRankFromEvent(event: string): LifecycleRank | null {
+export function lifecycleRankFromEvent(
+  event: string,
+  data?: { status?: string }
+): LifecycleRank | null {
   switch (event) {
     case 'ready':
       return 3;
@@ -167,7 +170,10 @@ export function lifecycleRankFromEvent(event: string): LifecycleRank | null {
     case 'disconnected':
     case 'auth_failure':
       return 0;
+    case 'change_state':
+      if (data?.status === 'CONNECTED') return 3;
+      return null;
     default:
-      return null; // don't update rank
+      return null;
   }
 }

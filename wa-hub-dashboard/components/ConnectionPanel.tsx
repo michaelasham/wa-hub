@@ -43,9 +43,14 @@ export function ConnectionPanel({
     'unknown';
 
   // Single source of truth: webhooks first, then API status
+  const changeStateData = (lastWebhook as { payload?: { data?: { status?: string } } })?.payload?.data;
+  const isChangeStateConnected =
+    lastWebhook?.event === 'change_state' && changeStateData?.status === 'CONNECTED';
   const statusIsReady =
     displayStatus === 'ready' ||
+    displayStatus === 'change_state:CONNECTED' ||
     lastWebhook?.event === 'ready' ||
+    isChangeStateConnected ||
     status?.state === 'ready' ||
     (status?.instanceStatus as string) === 'ready';
 
