@@ -15,7 +15,7 @@ import {
   Spinner,
   Text,
 } from '@shopify/polaris';
-import { useInstances, useWaHubReachable } from '@/hooks/useWaHub';
+import { useInstances, useWaHubReachable, useHealth } from '@/hooks/useWaHub';
 import { CreateInstanceButton } from '@/components/CreateInstanceButton';
 import { useState, useCallback } from 'react';
 import { waHubRequest } from '@/lib/wahubClient';
@@ -23,6 +23,7 @@ import { waHubRequest } from '@/lib/wahubClient';
 export default function HomePage() {
   const router = useRouter();
   const reachable = useWaHubReachable();
+  const { health } = useHealth();
   const { instances, loading, error, refresh } = useInstances();
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [fixingWebhooks, setFixingWebhooks] = useState(false);
@@ -166,6 +167,17 @@ export default function HomePage() {
           <Banner tone={fixWebhooksResult.startsWith('Updated') ? 'success' : 'warning'} onDismiss={() => setFixWebhooksResult(null)}>
             <p>{fixWebhooksResult}</p>
           </Banner>
+        )}
+
+        {reachable !== false && health?.cpuPercent != null && (
+          <div style={{ marginBottom: '1rem' }}>
+            <Text as="p" tone="subdued">
+              CPU usage: <strong>{health.cpuPercent}%</strong>
+              {health.instanceCount != null && (
+                <> · {health.instanceCount} instance{health.instanceCount !== 1 ? 's' : ''}</>
+              )}
+            </Text>
+          </div>
         )}
 
         <Card>
