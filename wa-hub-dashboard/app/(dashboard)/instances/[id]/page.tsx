@@ -51,9 +51,10 @@ export default function InstanceDetailPage() {
     return () => { cancelled = true; };
   }, [fetchStatus]);
 
-  // Poll status only when authenticated (syncing), waiting for ready - for countdown timer
+  // Poll status when: (a) authenticated (syncing) for countdown, or (b) needs_qr so QrPanel gets fresh status and stops QR fetch when we transition
   const lastWh = events.find((e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === id)?.data as { event?: string } | undefined;
-  const isWaiting = lastWh?.event === 'authenticated';
+  const needsQr = (status?.instanceStatus as string) === 'qr' || (status?.state as string) === 'needs_qr';
+  const isWaiting = lastWh?.event === 'authenticated' || needsQr;
   useEffect(() => {
     if (!isWaiting) return;
     const interval = setInterval(fetchStatus, 3000);
