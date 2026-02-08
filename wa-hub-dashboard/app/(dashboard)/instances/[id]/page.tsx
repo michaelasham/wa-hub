@@ -51,8 +51,9 @@ export default function InstanceDetailPage() {
     return () => { cancelled = true; };
   }, [fetchStatus]);
 
-  // Poll status when waiting for ready (needs_qr, connecting, authenticated) for countdown timer
-  const isWaiting = status && ['qr', 'needs_qr', 'initializing', 'authenticated'].includes(String((status as { instanceStatus?: string }).instanceStatus ?? (status as { state?: string }).state ?? ''));
+  // Poll status only when authenticated (syncing), waiting for ready - for countdown timer
+  const lastWh = events.find((e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === id)?.data as { event?: string } | undefined;
+  const isWaiting = lastWh?.event === 'authenticated';
   useEffect(() => {
     if (!isWaiting) return;
     const interval = setInterval(fetchStatus, 3000);
@@ -148,7 +149,7 @@ export default function InstanceDetailPage() {
           <Layout.Section>
             <BlockStack gap="400">
               <ConnectionPanel instanceId={id} status={status} loading={loading} events={events} onRefresh={handleRefresh} />
-              <QrPanel instanceId={id} events={events} />
+              <QrPanel instanceId={id} events={events} status={status} />
             </BlockStack>
           </Layout.Section>
           <Layout.Section>

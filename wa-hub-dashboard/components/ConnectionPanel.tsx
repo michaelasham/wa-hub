@@ -66,9 +66,9 @@ export function ConnectionPanel({
     }
   };
 
-  // Countdown: remaining time until ready_timeout (when waiting for ready)
+  // Countdown: only after authenticated, when waiting for ready (syncing)
   const s = status as { readyWatchdogStartAt?: string; readyWatchdogMs?: number } | null;
-  const isWaiting = rank < 3 && s?.readyWatchdogStartAt && s?.readyWatchdogMs;
+  const isWaiting = rank === 2 && s?.readyWatchdogStartAt && s?.readyWatchdogMs;
   const [countdownSec, setCountdownSec] = useState<number | null>(null);
 
   useEffect(() => {

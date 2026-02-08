@@ -1,20 +1,25 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { Card, Text, BlockStack, Badge, Banner } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
+import { waHubRequest } from '@/lib/wahubClient';
 
 /**
- * QR Panel - webhook-driven. Wa-hub sends qr events via webhook; no polling.
+ * QR Panel - webhook-driven primary; auto-fetch from API when webhooks fail (e.g. 401).
  */
 export function QrPanel({
   instanceId,
   events,
+  status,
 }: {
   instanceId: string;
   events: SseEvent[];
+  status: Record<string, unknown> | null;
 }) {
-  const qr = useMemo(() => {
+  const [qrFromApi, setQrFromApi] = useState<string | null>(null);
+
+  const qrFromWebhooks = useMemo(() => {
     // Prefer explicit 'qr' broadcast (from webhook handler)
     const qrEv = events.find(
       (e) =>
@@ -44,6 +49,36 @@ export function QrPanel({
     return null;
   }, [events, instanceId]);
 
+  const qr = qrFromWebhooks ?? qrFromApi;
+
+  const needsQr =
+    (status?.instanceStatus as string) === 'qr' ||
+    (status?.state as string) === 'needs_qr';
+
+  // Auto-fetch QR from API only when status is needs_qr and webhooks don't have it
+  useEffect(() => {
+    if (!needsQr || qrFromWebhooks) {
+      if (!needsQr) setQrFromApi(null);
+      return;
+    }
+    let cancelled = false;
+    const fetchQr = async () => {
+      const res = await waHubRequest<{ qrCode?: { data?: { qr_code?: string } } }>({
+        method: 'GET',
+        path: `/instances/${instanceId}/client/qr`,
+      });
+      if (!cancelled && res.ok && res.data?.qrCode?.data?.qr_code) {
+        setQrFromApi(res.data.qrCode.data.qr_code);
+      }
+    };
+    fetchQr();
+    const interval = setInterval(fetchQr, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [instanceId, needsQr, qrFromWebhooks]);
+
   return (
     <Card>
       <div style={{ padding: '1rem' }}>
@@ -51,12 +86,11 @@ export function QrPanel({
           QR Code
         </Text>
         <BlockStack gap="400">
-          <Badge tone="info">Webhook-driven (no polling)</Badge>
+          <Badge tone="info">Webhook-driven (API fallback)</Badge>
           {!qr && (
             <Banner tone="info">
               <p>
-                QR will appear when wa-hub sends a qr webhook. Ensure the instance webhook URL
-                points to this dashboard and the instance is in needs_qr state.
+                Loading QR… (webhook-driven; auto-fetching from API if needed)
               </p>
             </Banner>
           )}
