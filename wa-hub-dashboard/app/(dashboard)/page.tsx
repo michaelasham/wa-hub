@@ -18,12 +18,46 @@ import {
 import { useInstances, useWaHubReachable } from '@/hooks/useWaHub';
 import { CreateInstanceButton } from '@/components/CreateInstanceButton';
 import { useState, useCallback } from 'react';
+import { waHubRequest } from '@/lib/wahubClient';
 
 export default function HomePage() {
   const router = useRouter();
   const reachable = useWaHubReachable();
   const { instances, loading, error, refresh } = useInstances();
   const [userMenuActive, setUserMenuActive] = useState(false);
+  const [fixingWebhooks, setFixingWebhooks] = useState(false);
+  const [fixWebhooksResult, setFixWebhooksResult] = useState<string | null>(null);
+
+  const handleFixWebhookUrls = useCallback(async () => {
+    setFixingWebhooks(true);
+    setFixWebhooksResult(null);
+    try {
+      const cfgRes = await fetch('/api/config');
+      const cfg = await cfgRes.json();
+      const webhookUrl = cfg?.webhookUrl ?? cfg?.internalUrl;
+      if (!webhookUrl) {
+        setFixWebhooksResult('No webhook URL in config. Set DASHBOARD_WEBHOOK_INTERNAL_URL or DASHBOARD_WEBHOOK_PUBLIC_URL.');
+        return;
+      }
+      let ok = 0;
+      let fail = 0;
+      for (const inst of instances) {
+        const res = await waHubRequest({
+          method: 'PUT',
+          path: `/instances/${encodeURIComponent(inst.id)}`,
+          body: { webhook: { url: webhookUrl } },
+        });
+        if (res.ok) ok++;
+        else fail++;
+      }
+      setFixWebhooksResult(`Updated ${ok} instance(s).${fail ? ` ${fail} failed.` : ''}`);
+      if (ok > 0) refresh();
+    } catch (e) {
+      setFixWebhooksResult((e instanceof Error ? e.message : 'Failed') + '.');
+    } finally {
+      setFixingWebhooks(false);
+    }
+  }, [instances, refresh]);
 
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
@@ -97,6 +131,12 @@ export default function HomePage() {
         primaryAction={<CreateInstanceButton onCreated={refresh} />}
         secondaryActions={[
           {
+            content: 'Fix webhook URLs',
+            onAction: handleFixWebhookUrls,
+            loading: fixingWebhooks,
+            disabled: instances.length === 0 || fixingWebhooks,
+          },
+          {
             content: 'Refresh',
             onAction: refresh,
           },
@@ -119,6 +159,12 @@ export default function HomePage() {
             <p>
               {error} {reachable === false && '(401/403: check WA_HUB_TOKEN)'}
             </p>
+          </Banner>
+        )}
+
+        {fixWebhooksResult && (
+          <Banner tone={fixWebhooksResult.startsWith('Updated') ? 'success' : 'warning'} onDismiss={() => setFixWebhooksResult(null)}>
+            <p>{fixWebhooksResult}</p>
           </Banner>
         )}
 

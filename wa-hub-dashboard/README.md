@@ -43,7 +43,8 @@ DASHBOARD_SESSION_SECRET=random-32-char-string-for-signing
 | DASHBOARD_SESSION_SECRET | Secret for signing session cookies (required if password set) | random-32-char-string |
 | WA_HUB_BASE_URL | wa-hub API base URL | http://localhost:3000 |
 | WA_HUB_TOKEN | API key (Bearer token) | your-api-key |
-| DASHBOARD_WEBHOOK_PUBLIC_URL | URL wa-hub will POST webhooks to | http://localhost:3000/api/wahub/webhook |
+| DASHBOARD_WEBHOOK_PUBLIC_URL | URL wa-hub will POST webhooks to (public) | http://localhost:3000/api/wahub/webhook |
+| DASHBOARD_WEBHOOK_INTERNAL_URL | Same-server fix: use localhost to avoid 401 (e.g. http://localhost:3001/api/wahub/webhook) | (empty) |
 | WA_HUB_WEBHOOK_SIGNATURE_SECRET | Must match wa-hub WEBHOOK_SECRET for signature verification | |
 | POLL_INTERVAL_MS | (Legacy) Status poll interval | 3000 |
 | QR_POLL_INTERVAL_MS | (Legacy) QR poll interval | 4000 |
