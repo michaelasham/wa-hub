@@ -965,21 +965,33 @@ function setupEventListeners(instanceId, client) {
   });
   
   // Message - fire-and-forget webhook (never block lifecycle)
-  client.on('message', (message) => {
+  // Listen to both 'message' and 'message_create' (whatsapp-web.js v1.34 emits message_create; message can be unreliable)
+  const recentMessageIds = new Set();
+  const MAX_RECENT_IDS = 200;
+  const handleIncomingMessage = (message) => {
     if (guard()) return;
-    console.log(`[${instanceId}] Received message event (from: ${extractPhoneNumber(message.from)}, type: ${message.type || 'text'})`);
+    const msgId = message.id?._serialized || message.id || null;
+    if (msgId && recentMessageIds.has(msgId)) return; // dedupe when both events fire
+    if (msgId) {
+      recentMessageIds.add(msgId);
+      if (recentMessageIds.size > MAX_RECENT_IDS) recentMessageIds.clear();
+    }
+    const from = extractPhoneNumber(message.from);
+    console.log(`[${instanceId}] Received message (from: ${from}, type: ${message.type || 'text'}, id: ${msgId || 'n/a'})`);
     const messageData = {
       message: {
-        from: extractPhoneNumber(message.from),
+        from,
         body: message.body || message.text || '',
         text: message.body || message.text || '',
         type: message.type || 'text',
         timestamp: message.timestamp,
-        id: message.id?._serialized || message.id || null,
+        id: msgId,
       },
     };
     void forwardWebhook(instanceId, 'message', messageData).catch(err => recordWebhookError(instanceId, err));
-  });
+  };
+  client.on('message', handleIncomingMessage);
+  client.on('message_create', handleIncomingMessage);
 
   // Vote update - fire-and-forget webhook (never block lifecycle)
   client.on('vote_update', (vote) => {
