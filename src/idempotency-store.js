@@ -24,12 +24,50 @@ class IdempotencyStore {
     this.loading = (async () => {
       try {
         const data = await fs.readFile(this.dataPath, 'utf8');
-        const records = JSON.parse(data);
+        
+        // Check if file is empty or just whitespace
+        const trimmed = data.trim();
+        if (!trimmed) {
+          console.warn(`[IdempotencyStore] File is empty, starting fresh`);
+          this.cache.clear();
+          return [];
+        }
+        
+        // Parse JSON with error handling
+        let records;
+        try {
+          records = JSON.parse(data);
+        } catch (parseError) {
+          // File exists but is corrupted - back it up and start fresh
+          const backupPath = `${this.dataPath}.corrupted.${Date.now()}`;
+          console.error(`[IdempotencyStore] JSON parse error, backing up corrupted file to ${backupPath}:`, parseError.message);
+          
+          try {
+            await fs.copyFile(this.dataPath, backupPath);
+            console.log(`[IdempotencyStore] Corrupted file backed up to ${backupPath}`);
+          } catch (backupError) {
+            console.error(`[IdempotencyStore] Failed to backup corrupted file:`, backupError.message);
+          }
+          
+          // Start fresh
+          this.cache.clear();
+          return [];
+        }
+        
+        // Validate records is an array
+        if (!Array.isArray(records)) {
+          console.warn(`[IdempotencyStore] Data is not an array, starting fresh`);
+          this.cache.clear();
+          return [];
+        }
         
         // Clear cache and reload
         this.cache.clear();
         for (const record of records) {
-          this.cache.set(record.idempotencyKey, record);
+          // Validate record structure
+          if (record && record.idempotencyKey) {
+            this.cache.set(record.idempotencyKey, record);
+          }
         }
         
         console.log(`[IdempotencyStore] Loaded ${records.length} records`);
@@ -40,7 +78,10 @@ class IdempotencyStore {
           this.cache.clear();
           return [];
         }
-        throw error;
+        // For other errors, log and start fresh to avoid blocking
+        console.error(`[IdempotencyStore] Load error:`, error.message);
+        this.cache.clear();
+        return [];
       } finally {
         this.loading = null;
       }
@@ -69,30 +110,48 @@ class IdempotencyStore {
    * Get record by idempotency key
    */
   async get(idempotencyKey) {
-    await this.load();
-    return this.cache.get(idempotencyKey) || null;
+    try {
+      await this.load();
+      return this.cache.get(idempotencyKey) || null;
+    } catch (error) {
+      // Defensive: if load fails, return null to avoid crashing callers
+      console.error(`[IdempotencyStore] get() error for key ${idempotencyKey}:`, error.message);
+      return null;
+    }
   }
 
   /**
    * Check if idempotency key exists and is sent
    */
   async isSent(idempotencyKey) {
-    const record = await this.get(idempotencyKey);
-    return record && record.status === 'SENT';
+    try {
+      const record = await this.get(idempotencyKey);
+      return record && record.status === 'SENT';
+    } catch (error) {
+      // Defensive: if get fails, assume not sent to avoid blocking
+      console.error(`[IdempotencyStore] isSent() error for key ${idempotencyKey}:`, error.message);
+      return false;
+    }
   }
 
   /**
    * Check if idempotency key exists and is queued (and not stale)
    */
   async isQueued(idempotencyKey, staleThresholdMs = 3600000) { // 1 hour default
-    const record = await this.get(idempotencyKey);
-    if (!record || record.status !== 'QUEUED') {
+    try {
+      const record = await this.get(idempotencyKey);
+      if (!record || record.status !== 'QUEUED') {
+        return false;
+      }
+      
+      // Check if stale
+      const age = Date.now() - new Date(record.createdAt).getTime();
+      return age < staleThresholdMs;
+    } catch (error) {
+      // Defensive: if get fails, assume not queued to avoid blocking
+      console.error(`[IdempotencyStore] isQueued() error for key ${idempotencyKey}:`, error.message);
       return false;
     }
-    
-    // Check if stale
-    const age = Date.now() - new Date(record.createdAt).getTime();
-    return age < staleThresholdMs;
   }
 
   /**
