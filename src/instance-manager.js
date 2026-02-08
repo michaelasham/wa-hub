@@ -1794,36 +1794,129 @@ function getAllInstances() {
 }
 
 /**
- * Delete instance
+ * Purge LocalAuth session storage for an instance from disk.
+ * Safe to call even when instance/client doesn't exist (idempotent).
+ * Matches session dirs: session-{sanitizedId}, {sanitizedId}, Default-{sanitizedId}.
+ * @param {string} instanceId - Instance ID
+ * @returns {{ purged: boolean; purgedPaths: string[]; warnings: string[] }}
+ */
+async function purgeLocalAuthSession(instanceId) {
+  const warnings = [];
+  const purgedPaths = [];
+  const sanitizedId = sanitizeInstanceId(instanceId);
+  const authBase = config.authBaseDir;
+
+  const candidateDirs = [
+    `session-${sanitizedId}`,
+    sanitizedId,
+    `Default-${sanitizedId}`,
+  ];
+
+  for (const dirName of candidateDirs) {
+    const dirPath = path.join(authBase, dirName);
+    try {
+      const stat = await fs.stat(dirPath);
+      if (!stat.isDirectory()) continue;
+      await fs.rm(dirPath, { recursive: true, force: true });
+      purgedPaths.push(dirPath);
+      console.log(`[${instanceId}] Purged LocalAuth session: ${dirPath}`);
+    } catch (err) {
+      if (err.code === 'ENOENT') continue;
+      warnings.push(`Failed to purge ${dirPath}: ${err.message}`);
+      console.warn(`[${instanceId}] Purge warning: ${dirPath}:`, err.message);
+    }
+  }
+
+  return {
+    purged: purgedPaths.length > 0,
+    purgedPaths,
+    warnings,
+  };
+}
+
+/**
+ * Delete instance (hard delete).
+ * 1) Stop timers, destroy client (with timeout)
+ * 2) Remove from runtime map + persisted list
+ * 3) Purge LocalAuth session storage from disk
+ * Idempotent: if instance not in map, still purges session dirs if they exist.
+ * @param {string} instanceId
+ * @returns {Promise<{ deleted: boolean; purged: boolean; purgedPaths: string[]; warnings: string[] }>}
  */
 async function deleteInstance(instanceId) {
+  console.log(`[${instanceId}] DELETE_INSTANCE start`);
+  const result = { deleted: false, purged: false, purgedPaths: [], warnings: [] };
   const instance = instances.get(instanceId);
-  if (!instance) {
-    throw new Error(`Instance ${instanceId} not found`);
-  }
-  
-  console.log(`[${instanceId}] Deleting instance`);
 
-  instance.clearReadyWatchdog();
-  instance.clearReadyPoll();
+  if (instance) {
+    instance.clearReadyWatchdog();
+    instance.clearReadyPoll();
+    instance.clearConnectingWatchdog();
+    stopSendLoop(instanceId);
 
-  const client = instance.client;
-  // Remove from map first so event handlers no-op on any late events during destroy
-  instances.delete(instanceId);
-  saveInstancesToDisk().catch(err => console.error('[Persistence] Save failed:', err.message));
+    const client = instance.client;
+    instances.delete(instanceId);
+    await saveInstancesToDisk().catch(err => {
+      result.warnings.push(`Save failed: ${err.message}`);
+      console.error('[Persistence] Save failed:', err.message);
+    });
 
-  if (client) {
-    try {
-      await client.logout();
-    } catch (err) {
-      // Ignore
+    if (client) {
+      try {
+        await client.logout();
+      } catch (err) {
+        result.warnings.push(`logout: ${err.message}`);
+      }
+      try {
+        await Promise.race([
+          client.destroy(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('destroy timeout')), config.deleteDestroyTimeoutMs)
+          ),
+        ]);
+        console.log(`[${instanceId}] Client destroyed`);
+      } catch (err) {
+        result.warnings.push(`destroy: ${err.message}`);
+        console.warn(`[${instanceId}] Destroy error (continuing with purge):`, err.message);
+      }
     }
+    result.deleted = true;
+  } else {
     try {
-      await client.destroy();
+      const rawData = await fs.readFile(config.instancesDataPath, 'utf8');
+      const list = (() => {
+        try {
+          const parsed = JSON.parse(rawData);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      })();
+      const filtered = list.filter((x) => x && x.id !== instanceId);
+      if (filtered.length !== list.length) {
+        const dataDir = path.dirname(config.instancesDataPath);
+        await fs.mkdir(dataDir, { recursive: true }).catch(() => {});
+        await fs.writeFile(config.instancesDataPath, JSON.stringify(filtered, null, 2));
+        result.deleted = true;
+      }
     } catch (err) {
-      // Ignore
+      if (err.code !== 'ENOENT') {
+        result.warnings.push(`instances file: ${err.message}`);
+      }
     }
   }
+
+  const purgeResult = await purgeLocalAuthSession(instanceId);
+  result.purged = purgeResult.purged;
+  result.purgedPaths = purgeResult.purgedPaths;
+  result.warnings.push(...purgeResult.warnings);
+
+  console.log(`[${instanceId}] DELETE_INSTANCE end`, {
+    deleted: result.deleted,
+    purged: result.purged,
+    purgedPaths: result.purgedPaths,
+  });
+  return result;
 }
 
 /**

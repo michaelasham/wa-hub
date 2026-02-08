@@ -9,15 +9,16 @@ This document explains why drift happens, how to detect it, and how to safely cl
 
 ## Why Drift Happens
 
-Drift between the instances list and LocalAuth directories is expected:
+Drift between the instances list and LocalAuth directories can occur:
 
 | Scenario | Result |
 |----------|--------|
-| Instance deleted via API | Instance removed from `.wwebjs_instances.json`, but LocalAuth dir remains on disk |
+| **DELETE /instances/:id** (current behavior) | Hard delete: client destroyed, instance removed from list, **LocalAuth dir purged**. Recreating with same id requires new QR. |
+| Legacy delete (pre-purge) or crash before purge | Instance removed from list, but LocalAuth dir may remain on disk |
 | Instance never started | Instance exists in JSON, no `session-{clientId}` dir yet |
 | Manual edits or migration | Instances JSON and auth dirs may have been modified separately |
 
-wa-hub intentionally does **not** delete LocalAuth directories when an instance is deleted. Mutating or deleting session data while wa-hub (and Chromium) is running can cause hangs or crashes. LocalAuth remains the persistence source of truth for session state.
+**Current behavior:** `DELETE /instances/:id` performs a hard delete and purges LocalAuth session storage. Orphans can still exist from older deletions (before this change), crashes, or manual edits. Use `sessions-gc.js` to clean them up.
 
 ## Consequences of Drift
 

@@ -10,7 +10,7 @@ Multi-tenant WhatsApp Web session manager service built with Node.js, Express, a
 
 wa-hub follows whatsapp-web.js best practices for session persistence and lifecycle:
 
-1. **LocalAuth is the single source of truth** – Session data lives in `authBaseDir` (e.g. `./.wwebjs_auth/session-{clientId}/`). We never mutate or delete this while a client is running.
+1. **LocalAuth is the single source of truth** – Session data lives in `authBaseDir` (e.g. `./.wwebjs_auth/session-{clientId}/`). We do not mutate or delete it while a client is running. On `DELETE /instances/:id`, we destroy the client first, then purge the LocalAuth session directory.
 
 2. **Event handlers before `initialize()`** – Listeners for `qr`, `authenticated`, `ready`, `auth_failure`, `disconnected`, `change_state` are attached before `client.initialize()`.
 
@@ -81,6 +81,7 @@ LOG_LEVEL=info
 | `WEBHOOK_PROTECTION_BYPASS` | Vercel deployment protection bypass secret (for webhook 401 fix) | - | No |
 | `WEBHOOK_AUTH_TOKEN` | Bearer token sent with webhooks (if receiver requires Authorization header) | - | No |
 | `READY_WATCHDOG_MS` | Timeout for ready event before soft-restart (ms) | `600000` (10 min) | No |
+| `DELETE_DESTROY_TIMEOUT_MS` | Timeout for client.destroy() on delete before purge (ms) | `15000` (15s) | No |
 | `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
@@ -221,6 +222,7 @@ Content-Type: application/json
 ```bash
 DELETE /instances/:id
 ```
+**Hard delete:** Destroys the client, removes from runtime and persisted list, and **purges LocalAuth session storage**. Recreating an instance with the same id will require a new QR and can connect a different number. Idempotent: if the instance is not in memory, still purges session dirs if they exist. See [docs/HARD_DELETE.md](./docs/HARD_DELETE.md).
 
 ### 10. Logout Instance
 ```bash
@@ -501,7 +503,7 @@ All typing indicator activity is logged with structured format:
 
 ## Session Drift (Instances vs LocalAuth)
 
-Drift between the instances list (`.wwebjs_instances.json`) and LocalAuth session directories (`.wwebjs_auth/session-{clientId}/`) is expected: LocalAuth dirs remain after instance deletion, and instances may exist without a session dir (e.g. never started). Use `scripts/sessions-gc.js` to report drift and optionally remove orphaned session dirs. **Never delete session data while wa-hub is running.**
+Drift between the instances list (`.wwebjs_instances.json`) and LocalAuth session directories (`.wwebjs_auth/session-{clientId}/`) can occur. **`DELETE /instances/:id` performs a hard delete and purges LocalAuth session storage** — recreating with the same id requires a new QR. Orphans can still exist from legacy deletes or crashes. Use `scripts/sessions-gc.js` to report drift and optionally remove orphaned session dirs. **Never manually delete session data while wa-hub is running.**
 
 ```bash
 # Dry-run report
@@ -516,6 +518,10 @@ See [docs/SESSION_DRIFT.md](./docs/SESSION_DRIFT.md) for details and recommended
 ## Ready-Poll Fallback
 
 whatsapp-web.js sometimes never emits the `ready` event even when the client is connected. wa-hub includes a fallback that polls `client.info` and `client.getState()` every `READY_POLL_INTERVAL_MS` (default 15s) after `authenticated`. Both signals must pass before we treat the client as ready. See [docs/READY_POLL.md](./docs/READY_POLL.md) for safety checks and diagnostics.
+
+## Dashboard ↔ wa-hub Communication
+
+For clients integrating with wa-hub: how the dashboard fetches status, receives webhooks, uses SSE, and treats webhooks as the source of truth. See [docs/DASHBOARD_WAHUB_COMMUNICATION.md](./docs/DASHBOARD_WAHUB_COMMUNICATION.md).
 
 ## Disk Cleanup & Storage Management
 

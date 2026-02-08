@@ -568,27 +568,26 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
 
 /**
  * DELETE /instances/:id
- * Delete instance - destroys the instance completely (same as logout)
- * This logs out from WhatsApp, destroys the client, and removes the instance from memory
+ * Hard delete: destroys client, removes from runtime + persisted list, purges LocalAuth session.
+ * Idempotent: if instance not in memory, still purges session dirs if they exist.
+ * Recreating with same id will require a new QR and can connect a different number.
  */
 router.delete('/instances/:id', async (req, res) => {
   try {
     const instanceId = sanitizeInstanceId(getInstanceId(req.params));
-    
+
     if (!isValidInstanceId(instanceId)) {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const instance = instanceManager.getInstance(instanceId);
-    if (!instance) {
-      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
-    }
-
-    // Delete instance (logs out WhatsApp, destroys client, and removes from memory)
-    await instanceManager.deleteInstance(instanceId);
+    const result = await instanceManager.deleteInstance(instanceId);
 
     res.json(createSuccessResponse({
-      message: `Instance ${instanceId} deleted and destroyed successfully`,
+      message: `Instance ${instanceId} deleted successfully`,
+      deleted: result.deleted,
+      purged: result.purged,
+      purgedPaths: result.purgedPaths,
+      warnings: result.warnings.length ? result.warnings : undefined,
     }));
   } catch (error) {
     console.error('Error deleting instance:', error);
@@ -723,27 +722,24 @@ router.get('/instances/:id/diagnostics', async (req, res) => {
 
 /**
  * POST /instances/:id/client/action/logout
- * Logout instance - destroys the instance completely (same as DELETE)
- * This logs out from WhatsApp, destroys the client, and removes the instance from memory
+ * Hard delete (same as DELETE /instances/:id): destroys client, purges LocalAuth session.
  */
 router.post('/instances/:id/client/action/logout', async (req, res) => {
   try {
     const instanceId = sanitizeInstanceId(getInstanceId(req.params));
-    
+
     if (!isValidInstanceId(instanceId)) {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
     }
 
-    const instance = instanceManager.getInstance(instanceId);
-    if (!instance) {
-      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
-    }
-
-    // Delete instance (logs out WhatsApp, destroys client, and removes from memory)
-    await instanceManager.deleteInstance(instanceId);
+    const result = await instanceManager.deleteInstance(instanceId);
 
     res.json(createSuccessResponse({
       message: `Instance ${instanceId} logged out and destroyed successfully`,
+      deleted: result.deleted,
+      purged: result.purged,
+      purgedPaths: result.purgedPaths,
+      warnings: result.warnings.length ? result.warnings : undefined,
     }));
   } catch (error) {
     console.error('Error logging out instance:', error);

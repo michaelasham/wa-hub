@@ -79,6 +79,9 @@ const config = {
   // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
   connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
   connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '3', 10), // After this many, move to ERROR
+
+  // Delete: timeout for client.destroy() before purge (ms)
+  deleteDestroyTimeoutMs: parseInt(process.env.DELETE_DESTROY_TIMEOUT_MS || '15000', 10), // 15s default
 };
 
 // No default webhook URL - each instance must specify its own webhook URL
