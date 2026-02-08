@@ -76,6 +76,10 @@ const config = {
   // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
   readyPollIntervalMs: parseInt(process.env.READY_POLL_INTERVAL_MS || '15000', 10), // 15 sec default
 
+  // Fallback: poll unread messages when message events fail (whatsapp-web.js v1.34 bug)
+  messageFallbackPollIntervalMs: parseInt(process.env.MESSAGE_FALLBACK_POLL_INTERVAL_MS || '15000', 10), // 15 sec default
+  messageFallbackPollEnabled: process.env.MESSAGE_FALLBACK_POLL_ENABLED !== 'false', // Default: true
+
   // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
   connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
   connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '3', 10), // After this many, move to ERROR

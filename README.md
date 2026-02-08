@@ -519,6 +519,8 @@ See [docs/SESSION_DRIFT.md](./docs/SESSION_DRIFT.md) for details and recommended
 
 whatsapp-web.js sometimes never emits the `ready` event even when the client is connected. wa-hub includes a fallback that polls `client.info` and `client.getState()` every `READY_POLL_INTERVAL_MS` (default 15s) after `authenticated`. Both signals must pass before we treat the client as ready. See [docs/READY_POLL.md](./docs/READY_POLL.md) for safety checks and diagnostics.
 
+**Incoming messages:** whatsapp-web.js v1.34.4 has reports of `message` events failing to fire. wa-hub listens to both `message` and `message_create`, filters `fromMe` for incoming-only webhooks, dedupes by message ID, and runs a fallback poller for unread chats when the instance is READY. See [docs/INCOMING_MESSAGE_FALLBACK.md](./docs/INCOMING_MESSAGE_FALLBACK.md).
+
 ## Dashboard ↔ wa-hub Communication
 
 For clients integrating with wa-hub: how the dashboard fetches status, receives webhooks, uses SSE, and treats webhooks as the source of truth. See [docs/DASHBOARD_WAHUB_COMMUNICATION.md](./docs/DASHBOARD_WAHUB_COMMUNICATION.md).

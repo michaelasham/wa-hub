@@ -142,6 +142,19 @@ class InstanceContext {
     // Diagnostics: last lifecycle event (for whatsapp-web.js audit)
     this.lastLifecycleEvent = null;
     this.lastLifecycleEventAt = null;
+
+    // Incoming message dedupe (LRU, max 2000) - shared by event listeners and fallback poller
+    this.recentMessageIds = new Map(); // key -> timestamp
+    this.lastIncomingMessageAt = null;
+
+    // Fallback poller (when message events fail - whatsapp-web.js v1.34 bug)
+    this.messageFallbackPollTimer = null;
+    this.lastFallbackPollAt = null;
+    this.fallbackPollRuns = 0;
+    this.fallbackPollLastError = null;
+
+    // Listener attachment tracking (diagnostics)
+    this.listenersAttached = false;
   }
   
   /**
@@ -353,6 +366,16 @@ class InstanceContext {
   }
 
   /**
+   * Fallback: clear message poller (unread messages when message events fail)
+   */
+  clearMessageFallbackPoller() {
+    if (this.messageFallbackPollTimer) {
+      clearInterval(this.messageFallbackPollTimer);
+      this.messageFallbackPollTimer = null;
+    }
+  }
+
+  /**
    * Debug patch: start ready watchdog (call on qr/authenticated)
    */
   startReadyWatchdog() {
@@ -435,6 +458,7 @@ async function onReadyWatchdogTimeout(instanceId) {
     instance.readyWatchdogRestarted = true;
     instance.clearReadyWatchdog();
     instance.clearReadyPoll();
+    instance.clearMessageFallbackPoller();
     console.log(`[${instanceId}] ready_timeout: restarting client once`);
     try {
       if (instance.client) {
@@ -513,6 +537,71 @@ function recordWebhookError(instanceId, err) {
     recordWebhookError._lastLog[key] = now;
     console.error(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarding failed:`, msg);
   }
+}
+
+/**
+ * Serialize message for webhook payload
+ */
+function serializeMessage(message) {
+  const from = extractPhoneNumber(message.from);
+  const body = message.body || message.text || '';
+  const msgId = message.id?._serialized || message.id || null;
+  return {
+    from,
+    body,
+    text: body,
+    type: message.type || 'text',
+    timestamp: message.timestamp,
+    id: msgId,
+  };
+}
+
+/**
+ * Dedupe key for incoming messages (LRU cache)
+ */
+function getMessageDedupeKey(message) {
+  const msgId = message.id?._serialized || message.id;
+  if (msgId) return String(msgId);
+  const from = extractPhoneNumber(message.from);
+  const to = extractPhoneNumber(message.to || message.id?.remote || '');
+  const ts = message.timestamp || 0;
+  const body = (message.body || message.text || '').substring(0, 100);
+  const hash = crypto.createHash('md5').update(body).digest('hex').substring(0, 8);
+  return `${from}_${to}_${ts}_${hash}`;
+}
+
+const DEDUPE_MAX_SIZE = 2000;
+const FALLBACK_MAX_MESSAGES_PER_TICK = 50;
+const FALLBACK_MAX_CHATS_PER_TICK = 10;
+
+/**
+ * Process incoming message: dedupe, log, forward webhook.
+ * Called by both event listeners and fallback poller. Never blocks.
+ */
+function processIncomingMessage(instanceId, message) {
+  const instance = instances.get(instanceId);
+  if (!instance || !instance.webhookUrl) return;
+  const fromMe = message.fromMe === true || (message.id && message.id.fromMe === true);
+  if (fromMe) return; // Ignore outgoing for incoming webhooks
+
+  const key = getMessageDedupeKey(message);
+  const now = Date.now();
+  if (instance.recentMessageIds.has(key)) return;
+  instance.recentMessageIds.set(key, now);
+  if (instance.recentMessageIds.size > DEDUPE_MAX_SIZE) {
+    // Evict oldest (first inserted in Map)
+    const first = instance.recentMessageIds.keys().next().value;
+    if (first) instance.recentMessageIds.delete(first);
+  }
+
+  instance.lastIncomingMessageAt = new Date();
+  const from = extractPhoneNumber(message.from);
+  const msgId = message.id?._serialized || message.id || null;
+  const msgType = message.type || 'text';
+  console.log(`[${instanceId}] incoming message id=${msgId || 'n/a'} from=${from} type=${msgType}`);
+
+  const messageData = { message: serializeMessage(message) };
+  void forwardWebhook(instanceId, 'message', messageData).catch(err => recordWebhookError(instanceId, err));
 }
 
 /**
@@ -815,6 +904,7 @@ function setupEventListeners(instanceId, client) {
         recordWebhookError(instanceId, err)
       );
       startSendLoop(instanceId);
+      startMessageFallbackPoller();
       instance.lastEvent = 'ready';
       instance.lastLifecycleEvent = 'ready';
       instance.lastLifecycleEventAt = new Date();
@@ -870,6 +960,47 @@ function setupEventListeners(instanceId, client) {
     }, config.readyPollIntervalMs);
   }
 
+  // Fallback: poll unread messages when message events fail (whatsapp-web.js v1.34 bug)
+  async function runMessageFallbackPoll() {
+    if (!instances.has(instanceId)) return;
+    const inst = instances.get(instanceId);
+    if (!inst || inst.state !== InstanceState.READY || !inst.client) return;
+    inst.fallbackPollRuns = (inst.fallbackPollRuns || 0) + 1;
+    inst.lastFallbackPollAt = new Date();
+    try {
+      const chats = await client.getChats();
+      const unreadChats = chats.filter(c => (c.unreadCount || 0) > 0).slice(0, FALLBACK_MAX_CHATS_PER_TICK);
+      let processed = 0;
+      for (const chat of unreadChats) {
+        if (processed >= FALLBACK_MAX_MESSAGES_PER_TICK) break;
+        try {
+          const messages = await chat.fetchMessages({ limit: 5 });
+          const incoming = messages.filter(m => !m.fromMe && !(m.id && m.id.fromMe));
+          for (const msg of incoming) {
+            if (processed >= FALLBACK_MAX_MESSAGES_PER_TICK) break;
+            processIncomingMessage(instanceId, msg);
+            processed++;
+          }
+        } catch (chatErr) {
+          inst.fallbackPollLastError = chatErr.message;
+        }
+      }
+      if (processed > 0) inst.fallbackPollLastError = null;
+    } catch (err) {
+      inst.fallbackPollLastError = err.message;
+    }
+  }
+
+  function startMessageFallbackPoller() {
+    instance.clearMessageFallbackPoller();
+    if (!config.messageFallbackPollEnabled) return;
+    const intervalMs = config.messageFallbackPollIntervalMs;
+    console.log(`[${instanceId}] fallback poller started @ ${intervalMs}ms`);
+    instance.messageFallbackPollTimer = setInterval(() => {
+      void runMessageFallbackPoll().catch(() => {});
+    }, intervalMs);
+  }
+
   // Authenticated event - transition from NEEDS_QR to CONNECTING (syncing) until ready
   client.on('authenticated', () => {
     if (guard()) return;
@@ -914,6 +1045,7 @@ function setupEventListeners(instanceId, client) {
     instance.lastErrorAt = new Date();
     instance.clearReadyWatchdog();
     instance.clearReadyPoll();
+    instance.clearMessageFallbackPoller();
     instance.clearConnectingWatchdog();
     instance.transitionTo(InstanceState.NEEDS_QR, `Auth failure: ${msg}`);
     void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(err => recordWebhookError(instanceId, err));
@@ -933,6 +1065,7 @@ function setupEventListeners(instanceId, client) {
     instance.recordDisconnect();
     instance.clearReadyWatchdog();
     instance.clearReadyPoll();
+    instance.clearMessageFallbackPoller();
     stopSendLoop(instanceId);
     const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
     const reasonUpper = reasonStr.toUpperCase();
@@ -965,33 +1098,22 @@ function setupEventListeners(instanceId, client) {
   });
   
   // Message - fire-and-forget webhook (never block lifecycle)
-  // Listen to both 'message' and 'message_create' (whatsapp-web.js v1.34 emits message_create; message can be unreliable)
-  const recentMessageIds = new Set();
-  const MAX_RECENT_IDS = 200;
-  const handleIncomingMessage = (message) => {
+  // Listen to BOTH 'message' and 'message_create' (whatsapp-web.js v1.34: message can be unreliable; message_create fires for both incoming/outgoing)
+  // Do NOT gate listener attachment by webhook.events - always attach both for reliability
+  const onIncomingMessage = (message) => {
     if (guard()) return;
-    const msgId = message.id?._serialized || message.id || null;
-    if (msgId && recentMessageIds.has(msgId)) return; // dedupe when both events fire
-    if (msgId) {
-      recentMessageIds.add(msgId);
-      if (recentMessageIds.size > MAX_RECENT_IDS) recentMessageIds.clear();
-    }
-    const from = extractPhoneNumber(message.from);
-    console.log(`[${instanceId}] Received message (from: ${from}, type: ${message.type || 'text'}, id: ${msgId || 'n/a'})`);
-    const messageData = {
-      message: {
-        from,
-        body: message.body || message.text || '',
-        text: message.body || message.text || '',
-        type: message.type || 'text',
-        timestamp: message.timestamp,
-        id: msgId,
-      },
-    };
-    void forwardWebhook(instanceId, 'message', messageData).catch(err => recordWebhookError(instanceId, err));
+    processIncomingMessage(instanceId, message);
   };
-  client.on('message', handleIncomingMessage);
-  client.on('message_create', handleIncomingMessage);
+  const onMessageCreate = (message) => {
+    if (guard()) return;
+    // message_create fires for outgoing too - ignore fromMe for incoming webhooks
+    if (message.fromMe === true || (message.id && message.id.fromMe === true)) return;
+    processIncomingMessage(instanceId, message);
+  };
+  client.on('message', onIncomingMessage);
+  client.on('message_create', onMessageCreate);
+  instance.listenersAttached = true;
+  console.log(`[${instanceId}] listeners attached: message,message_create`);
 
   // Vote update - fire-and-forget webhook (never block lifecycle)
   client.on('vote_update', (vote) => {
@@ -1069,6 +1191,7 @@ async function softRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   console.log(`[${instanceId}] Starting soft restart...`);
   instance.clearReadyWatchdog();
   instance.clearReadyPoll();
+  instance.clearMessageFallbackPoller();
   instance.transitionTo(InstanceState.CONNECTING, 'soft restart');
   instance.qrReceivedDuringRestart = false;
   instance.startConnectingWatchdog();
@@ -1106,6 +1229,7 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   console.log(`[${instanceId}] Starting hard restart...`);
   instance.clearReadyWatchdog();
   instance.clearReadyPoll();
+  instance.clearMessageFallbackPoller();
   instance.transitionTo(InstanceState.CONNECTING, 'hard restart');
   instance.qrReceivedDuringRestart = false;
   instance.startConnectingWatchdog();
@@ -1867,6 +1991,7 @@ async function deleteInstance(instanceId) {
   if (instance) {
     instance.clearReadyWatchdog();
     instance.clearReadyPoll();
+    instance.clearMessageFallbackPoller();
     instance.clearConnectingWatchdog();
     stopSendLoop(instanceId);
 
@@ -2158,6 +2283,16 @@ function getInstanceDiagnostics(instanceId) {
     authenticatedToReadyMs: instance.authenticatedToReadyMs,
     readyPollAttempts: instance.readyPollAttempts || 0,
     lastReadyPollError: instance.lastReadyPollError,
+
+    // Incoming message diagnostics
+    listenersAttached: instance.listenersAttached || false,
+    fallbackPollEnabled: config.messageFallbackPollEnabled,
+    fallbackPollIntervalMs: config.messageFallbackPollIntervalMs,
+    lastFallbackPollAt: instance.lastFallbackPollAt ? instance.lastFallbackPollAt.toISOString() : null,
+    fallbackPollRuns: instance.fallbackPollRuns || 0,
+    fallbackPollLastError: instance.fallbackPollLastError,
+    lastIncomingMessageAt: instance.lastIncomingMessageAt ? instance.lastIncomingMessageAt.toISOString() : null,
+    dedupeCacheSize: instance.recentMessageIds ? instance.recentMessageIds.size : 0,
   };
 }
 
