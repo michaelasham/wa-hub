@@ -115,6 +115,13 @@ class InstanceContext {
     this.authenticatedAt = null; // For measuring authenticated -> ready duration
     // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
     this.readyPollTimer = null;
+    this.readyPollAttempts = 0;
+    this.lastReadyPollError = null;
+    // Ready diagnostics (observable)
+    this.readySource = null; // 'event' | 'poll' | null
+    this.readyAt = null;
+    this.authenticatedToReadyMs = null;
+    this.readyInProgress = false; // Guard against double-entry into markReady
 
     // Diagnostic: last webhook delivery
     this.lastWebhookEvent = null;
@@ -779,23 +786,81 @@ function setupEventListeners(instanceId, client) {
     });
   });
   
-  // Fallback: poll client.info when ready event never fires (whatsapp-web.js bug)
+  /**
+   * Mark instance as ready. Idempotent: if already READY or readyInProgress, returns without side effects.
+   * @param {string} source - 'event' | 'poll'
+   */
+  function markReady(source) {
+    if (instance.state === InstanceState.READY || instance.readyInProgress) return;
+    instance.readyInProgress = true;
+    try {
+      instance.clearReadyWatchdog();
+      instance.clearReadyPoll();
+      instance.readySource = source;
+      instance.readyAt = new Date();
+      instance.authenticatedToReadyMs = instance.authenticatedAt
+        ? Date.now() - instance.authenticatedAt.getTime()
+        : null;
+      try {
+        const info = client.info;
+        if (info) {
+          instance.displayName = info.pushname || null;
+          instance.phoneNumber = info.wid?.user || null;
+        }
+      } catch (error) {
+        console.error(`[${instanceId}] Error getting client info:`, error);
+      }
+      instance.transitionTo(InstanceState.READY);
+      void forwardWebhook(instanceId, 'ready', { status: 'ready' }).catch(err =>
+        recordWebhookError(instanceId, err)
+      );
+      startSendLoop(instanceId);
+      instance.lastEvent = 'ready';
+      instance.lastLifecycleEvent = 'ready';
+      instance.lastLifecycleEventAt = new Date();
+      debugLog(instanceId, 'ready', {
+        readySource: source,
+        authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+        authenticatedToReadyMs: instance.authenticatedToReadyMs,
+      });
+      console.log(`[${new Date().toISOString()}] [${instanceId}] Event: ready (source=${source})`);
+      if (instance.authenticatedToReadyMs != null) {
+        debugLog(instanceId, 'ready_after_authenticated_ms', {
+          ms: instance.authenticatedToReadyMs,
+          authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+        });
+      }
+    } finally {
+      instance.readyInProgress = false;
+    }
+  }
+
+  // Fallback: poll client.info + getState when ready event never fires (whatsapp-web.js bug)
   function startReadyPoll() {
     instance.clearReadyPoll();
-    instance.readyPollTimer = setInterval(() => {
+    instance.readyPollTimer = setInterval(async () => {
       if (!instances.has(instanceId) || instance.state === InstanceState.READY) {
         instance.clearReadyPoll();
         return;
       }
+      // Only allow poll-based ready after we've seen authenticated
+      if (!instance.authenticatedAt) return;
+      instance.readyPollAttempts = (instance.readyPollAttempts || 0) + 1;
       try {
         const info = client.info;
-        if (info) {
-          console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info present, treating as ready`);
-          instance.clearReadyPoll();
-          doReadyTransition();
+        if (!info) return;
+        const state = await client.getState();
+        if (!state || typeof state !== 'string' || state.length === 0) {
+          instance.lastReadyPollError = 'getState returned empty';
+          return;
         }
-      } catch {
-        // client.info not yet available
+        instance.lastReadyPollError = null;
+        console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info + getState ok, treating as ready`);
+        instance.clearReadyPoll();
+        markReady('poll');
+      } catch (e) {
+        instance.lastReadyPollError = e.message;
+        // Keep polling
       }
     }, config.readyPollIntervalMs);
   }
@@ -807,6 +872,11 @@ function setupEventListeners(instanceId, client) {
     instance.lastLifecycleEvent = 'authenticated';
     instance.lastLifecycleEventAt = new Date();
     instance.authenticatedAt = new Date();
+    instance.readySource = null;
+    instance.readyAt = null;
+    instance.authenticatedToReadyMs = null;
+    instance.readyPollAttempts = 0;
+    instance.lastReadyPollError = null;
     debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
     console.log(`[${ts}] [${instanceId}] Event: authenticated`);
     instance.lastEvent = 'authenticated';
@@ -820,38 +890,10 @@ function setupEventListeners(instanceId, client) {
     void forwardWebhook(instanceId, 'authenticated', {}).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Shared: perform ready transition (used by ready event and ready-poll fallback)
-  function doReadyTransition() {
-    if (guard() || instance.state === InstanceState.READY) return;
-    const ts = new Date().toISOString();
-    instance.clearReadyWatchdog();
-    instance.clearReadyPoll();
-    debugLog(instanceId, 'ready', {
-      authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
-      authenticatedToReadyMs: instance.authenticatedAt ? Date.now() - instance.authenticatedAt.getTime() : null,
-    });
-    console.log(`[${ts}] [${instanceId}] Event: ready`);
-    instance.lastEvent = 'ready';
-    instance.lastLifecycleEvent = 'ready';
-    instance.lastLifecycleEventAt = new Date();
-    try {
-      const info = client.info;
-      if (info) {
-        instance.displayName = info.pushname || null;
-        instance.phoneNumber = info.wid?.user || null;
-      }
-    } catch (error) {
-      console.error(`[${instanceId}] Error getting client info:`, error);
-    }
-    instance.transitionTo(InstanceState.READY);
-    void forwardWebhook(instanceId, 'ready', { status: 'ready' }).catch(err => recordWebhookError(instanceId, err));
-    startSendLoop(instanceId);
-  }
-
   // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('ready', () => {
     if (guard()) return;
-    doReadyTransition();
+    markReady('event');
   });
   
   // Auth failure - state transition FIRST, webhook fire-and-forget
@@ -1004,6 +1046,8 @@ async function softRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   }
   
   console.log(`[${instanceId}] Starting soft restart...`);
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
   instance.transitionTo(InstanceState.CONNECTING, 'soft restart');
   instance.qrReceivedDuringRestart = false;
   instance.startConnectingWatchdog();
@@ -1039,6 +1083,8 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   }
   
   console.log(`[${instanceId}] Starting hard restart...`);
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
   instance.transitionTo(InstanceState.CONNECTING, 'hard restart');
   instance.qrReceivedDuringRestart = false;
   instance.startConnectingWatchdog();
@@ -1991,6 +2037,13 @@ function getInstanceDiagnostics(instanceId) {
     queueDepth: instance.queue.length,
     sendLoopRunning: instance.sendLoopRunning,
     activeForCleanup: !!(instance.client && (instance.state === InstanceState.READY || instance.state === InstanceState.CONNECTING || instance.state === InstanceState.DISCONNECTED)),
+    // Ready-poll diagnostics
+    readySource: instance.readySource,
+    authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+    readyAt: instance.readyAt ? instance.readyAt.toISOString() : null,
+    authenticatedToReadyMs: instance.authenticatedToReadyMs,
+    readyPollAttempts: instance.readyPollAttempts || 0,
+    lastReadyPollError: instance.lastReadyPollError,
   };
 }
 

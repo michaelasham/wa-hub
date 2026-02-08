@@ -513,6 +513,10 @@ pm2 stop wa-hub && node scripts/sessions-gc.js --delete-orphans --confirm --no-d
 
 See [docs/SESSION_DRIFT.md](./docs/SESSION_DRIFT.md) for details and recommended ops workflow.
 
+## Ready-Poll Fallback
+
+whatsapp-web.js sometimes never emits the `ready` event even when the client is connected. wa-hub includes a fallback that polls `client.info` and `client.getState()` every `READY_POLL_INTERVAL_MS` (default 15s) after `authenticated`. Both signals must pass before we treat the client as ready. See [docs/READY_POLL.md](./docs/READY_POLL.md) for safety checks and diagnostics.
+
 ## Disk Cleanup & Storage Management
 
 WA-Hub uses Chromium/Puppeteer for each WhatsApp instance, which can accumulate significant cache data over time. To prevent disk storage from growing indefinitely, automated cleanup tools are provided.

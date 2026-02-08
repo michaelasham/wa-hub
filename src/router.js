@@ -283,6 +283,11 @@ router.get('/instances/:id/client/status', async (req, res) => {
         readyWatchdogMs: config.readyWatchdogMs,
         readyWatchdogStartAt: instance.readyWatchdogStartAt ? instance.readyWatchdogStartAt.toISOString() : null,
         authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
+        readySource: instance.readySource,
+        readyAt: instance.readyAt ? instance.readyAt.toISOString() : null,
+        authenticatedToReadyMs: instance.authenticatedToReadyMs,
+        readyPollAttempts: instance.readyPollAttempts || 0,
+        lastReadyPollError: instance.lastReadyPollError,
       },
     }));
   } catch (error) {
@@ -327,6 +332,11 @@ router.get('/instances/:id/client/info-raw', async (req, res) => {
         wid: info.wid ? { user: info.wid.user, _serialized: info.wid._serialized } : null,
       } : null,
       error: error,
+      readySource: instance.readySource,
+      readyAt: instance.readyAt ? instance.readyAt.toISOString() : null,
+      authenticatedToReadyMs: instance.authenticatedToReadyMs,
+      readyPollAttempts: instance.readyPollAttempts || 0,
+      lastReadyPollError: instance.lastReadyPollError,
     }));
   } catch (error) {
     console.error('Error getting raw client info:', error);
