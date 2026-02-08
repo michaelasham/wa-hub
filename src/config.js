@@ -14,6 +14,8 @@ const config = {
   webhookSecret: process.env.WEBHOOK_SECRET || process.env.MAIN_APP_WEBHOOK_SECRET,
   // Optional: bypass deployment protection (e.g. Vercel) - send this header with webhook POSTs
   webhookProtectionBypass: process.env.WEBHOOK_PROTECTION_BYPASS || process.env.VERCEL_AUTOMATION_BYPASS_SECRET,
+  // Optional: Bearer token for webhook receivers that require API-key auth (fixes 401 on protected endpoints)
+  webhookAuthToken: process.env.WEBHOOK_AUTH_TOKEN || process.env.WEBHOOK_BEARER_TOKEN,
   
   // API key for authentication (required for all endpoints except /health)
   apiKey: process.env.API_KEY,
@@ -69,7 +71,7 @@ const config = {
   disableAutoReconnect: process.env.DISABLE_AUTO_RECONNECT === 'true',
 
   // Debug patch: watchdog timeout for ready event (ms) - emit ready_timeout if not ready within this
-  readyWatchdogMs: parseInt(process.env.READY_WATCHDOG_MS || '180000', 10), // 180s default
+  readyWatchdogMs: parseInt(process.env.READY_WATCHDOG_MS || '600000', 10), // 10 min default
 
   // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
   connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default

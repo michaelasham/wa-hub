@@ -523,6 +523,10 @@ async function forwardWebhook(instanceId, event, data) {
     if (config.webhookProtectionBypass) {
       headers['x-vercel-protection-bypass'] = config.webhookProtectionBypass;
     }
+    // Optional: send Bearer token if receiver requires API-key auth (fixes 401 on protected webhook endpoints)
+    if (config.webhookAuthToken) {
+      headers['Authorization'] = `Bearer ${config.webhookAuthToken}`;
+    }
     await axios.post(instance.webhookUrl, payload, { headers });
     instance.lastWebhookEvent = event;
     instance.lastWebhookStatus = 'ok';
@@ -730,9 +734,12 @@ async function createClient(instanceId, instanceName) {
 function setupEventListeners(instanceId, client) {
   const instance = instances.get(instanceId);
   if (!instance) return;
-  
+
+  const guard = () => !instances.has(instanceId);
+
   // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('qr', (qr) => {
+    if (guard()) return;
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'qr';
     instance.lastLifecycleEventAt = new Date();
@@ -745,10 +752,12 @@ function setupEventListeners(instanceId, client) {
     instance.connectingWatchdogRestartCount = 0; // Progress: got QR
     instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
     qrToBase64(qr).then((qrBase64) => {
+      if (guard()) return;
       instance.qrCode = qrBase64;
       instance.lastQrUpdate = new Date();
       void forwardWebhook(instanceId, 'qr', { qr: qrBase64 }).catch(err => recordWebhookError(instanceId, err));
     }).catch((error) => {
+      if (guard()) return;
       console.error(`[${instanceId}] Error processing QR:`, error);
       instance.lastError = error.message;
       instance.lastErrorAt = new Date();
@@ -759,6 +768,7 @@ function setupEventListeners(instanceId, client) {
   
   // Authenticated event - state stays CONNECTING until ready
   client.on('authenticated', () => {
+    if (guard()) return;
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'authenticated';
     instance.lastLifecycleEventAt = new Date();
@@ -774,6 +784,7 @@ function setupEventListeners(instanceId, client) {
   
   // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('ready', () => {
+    if (guard()) return;
     const ts = new Date().toISOString();
     debugLog(instanceId, 'ready', {
       authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
@@ -799,6 +810,7 @@ function setupEventListeners(instanceId, client) {
   
   // Auth failure - state transition FIRST, webhook fire-and-forget
   client.on('auth_failure', (msg) => {
+    if (guard()) return;
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'auth_failure';
     instance.lastLifecycleEventAt = new Date();
@@ -815,6 +827,7 @@ function setupEventListeners(instanceId, client) {
   
   // Disconnected - state transition in handler, webhook fire-and-forget
   client.on('disconnected', (reason) => {
+    if (guard()) return;
     const reasonStr = reason || 'unknown';
     instance.lastLifecycleEvent = 'disconnected';
     instance.lastLifecycleEventAt = new Date();
@@ -847,6 +860,7 @@ function setupEventListeners(instanceId, client) {
   
   // State change (whatsapp-web.js internal state, not our InstanceState)
   client.on('change_state', (state) => {
+    if (guard()) return;
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = `change_state:${state}`;
     instance.lastLifecycleEventAt = new Date();
@@ -857,6 +871,7 @@ function setupEventListeners(instanceId, client) {
   
   // Message - fire-and-forget webhook (never block lifecycle)
   client.on('message', (message) => {
+    if (guard()) return;
     const messageData = {
       message: {
         from: extractPhoneNumber(message.from),
@@ -872,6 +887,7 @@ function setupEventListeners(instanceId, client) {
 
   // Vote update - fire-and-forget webhook (never block lifecycle)
   client.on('vote_update', (vote) => {
+    if (guard()) return;
     const voteData = {
       vote: {
         voter: extractPhoneNumber(vote.voter || vote.from || vote.chatId),
@@ -1688,22 +1704,24 @@ async function deleteInstance(instanceId) {
   }
   
   console.log(`[${instanceId}] Deleting instance`);
-  
-  if (instance.client) {
+
+  const client = instance.client;
+  // Remove from map first so event handlers no-op on any late events during destroy
+  instances.delete(instanceId);
+  saveInstancesToDisk().catch(err => console.error('[Persistence] Save failed:', err.message));
+
+  if (client) {
     try {
-      await instance.client.logout();
+      await client.logout();
     } catch (err) {
       // Ignore
     }
     try {
-      await instance.client.destroy();
+      await client.destroy();
     } catch (err) {
       // Ignore
     }
   }
-  
-  instances.delete(instanceId);
-  saveInstancesToDisk().catch(err => console.error('[Persistence] Save failed:', err.message));
 }
 
 /**

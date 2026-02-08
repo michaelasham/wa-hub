@@ -78,6 +78,9 @@ LOG_LEVEL=info
 | `PORT` | Server port | `3000` | No |
 | `API_KEY` | API key for authentication (required for all endpoints except `/health`) | - | Yes |
 | `WEBHOOK_SECRET` | Shared secret for webhook signature | - | Recommended |
+| `WEBHOOK_PROTECTION_BYPASS` | Vercel deployment protection bypass secret (for webhook 401 fix) | - | No |
+| `WEBHOOK_AUTH_TOKEN` | Bearer token sent with webhooks (if receiver requires Authorization header) | - | No |
+| `READY_WATCHDOG_MS` | Timeout for ready event before soft-restart (ms) | `600000` (10 min) | No |
 | `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
@@ -327,6 +330,28 @@ pm2 info wa-hub
 # Monitor resources
 pm2 monit
 ```
+
+### Automated Deployment with GitHub Actions (Recommended)
+
+For automated push-to-deploy on GCP Compute Engine VMs, see **[DEPLOY_SETUP.md](./DEPLOY_SETUP.md)** for complete setup instructions.
+
+This setup includes:
+- **Systemd service** management
+- **GitHub Actions** workflow for automatic deployment on push to `main`
+- **Secure SSH-based** deployment with dedicated deploy user
+- **Zero-downtime** deployments with automatic service restart
+
+Quick setup:
+1. Follow the VM setup steps in `DEPLOY_SETUP.md`
+2. Configure GitHub Secrets (`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`)
+3. Push to `main` branch to trigger automatic deployment
+
+The deployment workflow will:
+- Pull latest code from `main`
+- Install dependencies (`npm ci`)
+- Build if needed (`npm run build`)
+- Restart the `wa-hub` systemd service
+- Verify service status
 
 ### Using systemd (Alternative)
 

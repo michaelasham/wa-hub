@@ -279,6 +279,10 @@ router.get('/instances/:id/client/status', async (req, res) => {
         lastEvent: instance.lastEvent,
         lastDisconnectReason: instance.lastDisconnectReason,
         restartAttempts: instance.restartAttempts,
+        // Countdown: when waiting for ready (needs_qr/authenticated/connecting)
+        readyWatchdogMs: config.readyWatchdogMs,
+        readyWatchdogStartAt: instance.readyWatchdogStartAt ? instance.readyWatchdogStartAt.toISOString() : null,
+        authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
       },
     }));
   } catch (error) {

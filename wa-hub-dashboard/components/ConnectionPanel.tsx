@@ -2,7 +2,7 @@
 
 import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode, InlineStack, Button } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 const RANK_LABELS: Record<number, string> = {
   0: 'disconnected',
@@ -16,11 +16,13 @@ export function ConnectionPanel({
   status,
   loading,
   events,
+  onRefresh,
 }: {
   instanceId: string;
   status: Record<string, unknown> | null;
   loading: boolean;
   events: SseEvent[];
+  onRefresh?: () => void;
 }) {
   const [showRawStatus, setShowRawStatus] = useState(false);
   const webhooks = events.filter(
@@ -64,6 +66,27 @@ export function ConnectionPanel({
     }
   };
 
+  // Countdown: remaining time until ready_timeout (when waiting for ready)
+  const s = status as { readyWatchdogStartAt?: string; readyWatchdogMs?: number } | null;
+  const isWaiting = rank < 3 && s?.readyWatchdogStartAt && s?.readyWatchdogMs;
+  const [countdownSec, setCountdownSec] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isWaiting || !s?.readyWatchdogStartAt || !s?.readyWatchdogMs) {
+      setCountdownSec(null);
+      return;
+    }
+    const update = () => {
+      const start = new Date(s.readyWatchdogStartAt!).getTime();
+      const elapsed = Date.now() - start;
+      const remaining = Math.max(0, Math.floor((s.readyWatchdogMs! - elapsed) / 1000));
+      setCountdownSec(remaining);
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, [isWaiting, s?.readyWatchdogStartAt, s?.readyWatchdogMs]);
+
   return (
     <Card>
       <div style={{ padding: '1rem' }}>
@@ -101,6 +124,16 @@ export function ConnectionPanel({
                   needs_qr → syncing → active
                 </Text>
               </div>
+              {countdownSec !== null && countdownSec >= 0 && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <Text as="p" variant="bodySm" fontWeight="medium">
+                    Restart in: {Math.floor(countdownSec / 60)}:{String(countdownSec % 60).padStart(2, '0')}
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Instance will soft-restart if not ready in time
+                  </Text>
+                </div>
+              )}
             </div>
             {lastWebhook && (
               <div>

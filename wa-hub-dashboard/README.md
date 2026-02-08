@@ -65,8 +65,10 @@ Or run both wa-hub and dashboard on the same host and use the host's URL.
 If wa-hub logs "Webhook forwarding failed: Request failed with status code 401":
 
 1. **Deployment protection**: If the dashboard is on Vercel with Deployment Protection, set `WEBHOOK_PROTECTION_BYPASS` in wa-hub's `.env` to your Vercel bypass secret. wa-hub will send `x-vercel-protection-bypass` with webhook requests.
-2. **Reverse proxy auth**: Exclude `/api/wahub/webhook` from nginx/Cloudflare auth so server-to-server POSTs (no cookies) can reach it.
-3. **Same host**: When wa-hub and dashboard run on the same machine, use `http://localhost:PORT` or `http://127.0.0.1:PORT` as the webhook URL to avoid external auth layers.
+2. **Bearer auth**: If the webhook receiver requires `Authorization: Bearer <token>`, set `WEBHOOK_AUTH_TOKEN` in wa-hub's `.env` to that token.
+3. **Signature mismatch**: Ensure `WEBHOOK_SECRET` in wa-hub matches `WA_HUB_WEBHOOK_SIGNATURE_SECRET` in the receiver. If the receiver validates signatures and they don't match, it may return 401.
+4. **Reverse proxy auth**: Exclude `/api/wahub/webhook` from nginx/Cloudflare auth so server-to-server POSTs (no cookies) can reach it.
+5. **Same host**: When wa-hub and dashboard run on the same machine, use `http://localhost:PORT` or `http://127.0.0.1:PORT` as the webhook URL to avoid external auth layers.
 
 ## Troubleshooting: QR Not Appearing
 

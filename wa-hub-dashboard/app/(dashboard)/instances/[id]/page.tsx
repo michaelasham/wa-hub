@@ -30,24 +30,7 @@ export default function InstanceDetailPage() {
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [navigationActive, setNavigationActive] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const res = await waHubRequest<{ clientStatus?: unknown }>({
-        method: 'GET',
-        path: `/instances/${id}/client/status`,
-      });
-      if (!cancelled && res.ok && res.data) {
-        const data = res.data as { clientStatus?: unknown };
-        setStatus((data.clientStatus as Record<string, unknown>) ?? data as Record<string, unknown>);
-      }
-      setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [id]);
-
-  const handleRefresh = useCallback(async () => {
-    setLoading(true);
+  const fetchStatus = useCallback(async () => {
     const res = await waHubRequest<{ clientStatus?: unknown }>({
       method: 'GET',
       path: `/instances/${id}/client/status`,
@@ -56,8 +39,31 @@ export default function InstanceDetailPage() {
       const data = res.data as { clientStatus?: unknown };
       setStatus((data.clientStatus as Record<string, unknown>) ?? (data as Record<string, unknown>));
     }
-    setLoading(false);
+    return res.ok;
   }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await fetchStatus();
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [fetchStatus]);
+
+  // Poll status when waiting for ready (needs_qr, connecting, authenticated) for countdown timer
+  const isWaiting = status && ['qr', 'needs_qr', 'initializing', 'authenticated'].includes(String((status as { instanceStatus?: string }).instanceStatus ?? (status as { state?: string }).state ?? ''));
+  useEffect(() => {
+    if (!isWaiting) return;
+    const interval = setInterval(fetchStatus, 3000);
+    return () => clearInterval(interval);
+  }, [isWaiting, fetchStatus]);
+
+  const handleRefresh = useCallback(async () => {
+    setLoading(true);
+    await fetchStatus();
+    setLoading(false);
+  }, [fetchStatus]);
 
   const handleDelete = async () => {
     if (!confirm('Delete this instance?')) return;
