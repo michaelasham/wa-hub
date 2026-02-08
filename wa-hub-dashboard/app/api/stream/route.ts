@@ -6,6 +6,8 @@ export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
   const instanceId = request.nextUrl.searchParams.get('instanceId');
+  const scope = request.nextUrl.searchParams.get('scope');
+  const globalScope = scope === 'global';
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -17,18 +19,18 @@ export async function GET(request: NextRequest) {
       };
 
       const unsub = subscribeSse((event) => {
-        if (instanceId && 'instanceId' in event.data && event.data.instanceId !== instanceId) {
+        if (!globalScope && instanceId && 'instanceId' in event.data && event.data.instanceId !== instanceId) {
           return;
         }
         send(event);
       });
 
-      send({ type: 'connected', data: { instanceId } });
+      send({ type: 'connected', data: { instanceId, scope: globalScope ? 'global' : 'instance' } });
       send({
         type: 'initial',
         data: {
-          webhookEvents: getWebhookEvents(instanceId ?? undefined),
-          apiLogs: getApiLogs(instanceId ?? undefined),
+          webhookEvents: getWebhookEvents(globalScope ? undefined : (instanceId ?? undefined)),
+          apiLogs: getApiLogs(globalScope ? undefined : (instanceId ?? undefined)),
           instanceMeta: instanceId ? getInstanceMeta(instanceId) : null,
         },
       });

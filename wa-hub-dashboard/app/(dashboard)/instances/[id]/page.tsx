@@ -11,7 +11,7 @@ import {
   Layout,
   BlockStack,
 } from '@shopify/polaris';
-import { useSSE } from '@/hooks/useSSE';
+import { useSSE, SseScope } from '@/hooks/useSSE';
 import { waHubRequest } from '@/lib/wahubClient';
 import { ConnectionPanel } from '@/components/ConnectionPanel';
 import { QrPanel } from '@/components/QrPanel';
@@ -23,7 +23,8 @@ export default function InstanceDetailPage() {
   const params = useParams();
   const router = useRouter();
   const id = params.id as string;
-  const { events, connected } = useSSE(id);
+  const [webhookScope, setWebhookScope] = useState<SseScope>('instance');
+  const { events, connected } = useSSE(id, webhookScope);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [userMenuActive, setUserMenuActive] = useState(false);
@@ -151,7 +152,7 @@ export default function InstanceDetailPage() {
           </Layout.Section>
           <Layout.Section>
             <BlockStack gap="400">
-              <WebhooksPanel instanceId={id} events={events} />
+              <WebhooksPanel instanceId={id} events={events} scope={webhookScope} onScopeChange={setWebhookScope} />
               <LogsPanel instanceId={id} events={events} />
             </BlockStack>
           </Layout.Section>

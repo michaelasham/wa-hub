@@ -2,22 +2,44 @@
 
 import { useState } from 'react';
 import { Card, Text, Select, BlockStack, InlineStack, Collapsible, Badge, InlineCode, EmptyState } from '@shopify/polaris';
-import { SseEvent } from '@/hooks/useSSE';
+import { SseEvent, SseScope } from '@/hooks/useSSE';
 
 export function WebhooksPanel({
   instanceId,
   events,
+  scope,
+  onScopeChange,
 }: {
   instanceId: string;
   events: SseEvent[];
+  scope: SseScope;
+  onScopeChange: (scope: SseScope) => void;
 }) {
   const [filter, setFilter] = useState<string>('');
   const [openItems, setOpenItems] = useState<Set<number>>(new Set());
-  const webhooks = events.filter(
-    (e) =>
-      e.type === 'webhook' &&
-      (e.data as { instanceId?: string }).instanceId === instanceId
-  );
+
+  const fromStream = events.filter((e) => e.type === 'webhook');
+  const fromInitial = events.flatMap((e) => {
+    if (e.type !== 'initial') return [];
+    const list = (e.data as { webhookEvents?: Array<Record<string, unknown>> })?.webhookEvents ?? [];
+    return list.map((w) => ({ type: 'webhook' as const, data: w }));
+  });
+  const allWebhooks = [...fromStream];
+  for (const ev of fromInitial) {
+    if (!allWebhooks.some((x) => (x.data as { id?: string }).id === (ev.data as { id?: string }).id)) {
+      allWebhooks.push(ev);
+    }
+  }
+  allWebhooks.sort((a, b) => {
+    const ta = (a.data as { timestamp?: string }).timestamp ?? '';
+    const tb = (b.data as { timestamp?: string }).timestamp ?? '';
+    return tb.localeCompare(ta);
+  });
+  const webhooks =
+    scope === 'global'
+      ? allWebhooks
+      : allWebhooks.filter((e) => (e.data as { instanceId?: string }).instanceId === instanceId);
+
   const filtered = filter
     ? webhooks.filter((e) => (e.data as { event?: string }).event === filter)
     : webhooks;
@@ -34,8 +56,13 @@ export function WebhooksPanel({
     setOpenItems(newOpen);
   };
 
-  const options = [
-    { label: 'All events', value: '' },
+  const scopeOptions = [
+    { label: 'This instance only', value: 'instance' },
+    { label: 'Global (all instances)', value: 'global' },
+  ];
+
+  const typeOptions = [
+    { label: 'All event types', value: '' },
     ...eventTypes.map((t) => ({ label: t || 'Unknown', value: t || '' })),
   ];
 
@@ -46,12 +73,24 @@ export function WebhooksPanel({
           Webhooks (live)
         </Text>
         <BlockStack gap="200">
-          <Select
-            label="Filter by event type"
-            options={options}
-            value={filter}
-            onChange={setFilter}
-          />
+          <InlineStack gap="400" wrap={false}>
+            <div style={{ minWidth: '180px' }}>
+              <Select
+                label="Scope"
+                options={scopeOptions}
+                value={scope}
+                onChange={(v) => onScopeChange(v as SseScope)}
+              />
+            </div>
+            <div style={{ minWidth: '160px' }}>
+              <Select
+                label="Filter by event type"
+                options={typeOptions}
+                value={filter}
+                onChange={setFilter}
+              />
+            </div>
+          </InlineStack>
           <div style={{ maxHeight: '400px', overflow: 'auto' }}>
             {filtered.length === 0 ? (
               <EmptyState image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png" heading="No webhook events">
@@ -96,6 +135,9 @@ export function WebhooksPanel({
                           <Text as="span" variant="bodyMd" fontWeight="semibold">
                             {d.event}
                           </Text>
+                          {scope === 'global' && d.instanceId && (
+                            <Badge tone="info">{d.instanceId}</Badge>
+                          )}
                           <Text as="span" variant="bodySm" tone="subdued">
                             @ {d.timestamp}
                           </Text>

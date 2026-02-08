@@ -7,14 +7,17 @@ export interface SseEvent {
   data: unknown;
 }
 
-export function useSSE(instanceId?: string) {
+export type SseScope = 'instance' | 'global';
+
+export function useSSE(instanceId?: string, scope: SseScope = 'instance') {
   const [events, setEvents] = useState<SseEvent[]>([]);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const url = instanceId
-      ? `/api/stream?instanceId=${encodeURIComponent(instanceId)}`
-      : '/api/stream';
+    const params = new URLSearchParams();
+    if (instanceId) params.set('instanceId', instanceId);
+    if (scope === 'global') params.set('scope', 'global');
+    const url = `/api/stream${params.toString() ? '?' + params.toString() : ''}`;
     const es = new EventSource(url);
 
     es.onopen = () => setConnected(true);
@@ -30,7 +33,7 @@ export function useSSE(instanceId?: string) {
       es.close();
       setConnected(false);
     };
-  }, [instanceId]);
+  }, [instanceId, scope]);
 
   const clear = useCallback(() => setEvents([]), []);
 
