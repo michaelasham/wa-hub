@@ -474,6 +474,20 @@ All typing indicator activity is logged with structured format:
 [instanceName] [Typing] Skipped: chat_not_found (chatId: ***4599)
 ```
 
+## Session Drift (Instances vs LocalAuth)
+
+Drift between the instances list (`.wwebjs_instances.json`) and LocalAuth session directories (`.wwebjs_auth/session-{clientId}/`) is expected: LocalAuth dirs remain after instance deletion, and instances may exist without a session dir (e.g. never started). Use `scripts/sessions-gc.js` to report drift and optionally remove orphaned session dirs. **Never delete session data while wa-hub is running.**
+
+```bash
+# Dry-run report
+node scripts/sessions-gc.js
+
+# Delete orphans (stop wa-hub first)
+pm2 stop wa-hub && node scripts/sessions-gc.js --delete-orphans --confirm --no-dry-run && pm2 start wa-hub
+```
+
+See [docs/SESSION_DRIFT.md](./docs/SESSION_DRIFT.md) for details and recommended ops workflow.
+
 ## Disk Cleanup & Storage Management
 
 WA-Hub uses Chromium/Puppeteer for each WhatsApp instance, which can accumulate significant cache data over time. To prevent disk storage from growing indefinitely, automated cleanup tools are provided.
