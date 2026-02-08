@@ -193,6 +193,16 @@ class InstanceContext {
       stopSendLoop(this.id);
       this.clearConnectingWatchdog();
       this.connectingWatchdogRestartCount = 0;
+      // Reject ready promise so createInstance can return when QR is received (QR = success for init)
+      if (this.readyRejector) {
+        this.readyRejector(new Error(`Instance in ${newState} state`));
+        this.readyResolver = null;
+        this.readyRejector = null;
+        if (this.readyTimeout) {
+          clearTimeout(this.readyTimeout);
+          this.readyTimeout = null;
+        }
+      }
     }
     // Note: CONNECTING watchdog started only in softRestart/hardRestart, not in createInstance
   }
@@ -509,6 +519,9 @@ async function forwardWebhook(instanceId, event, data) {
       const hmac = crypto.createHmac('sha256', config.webhookSecret);
       const signature = hmac.update(JSON.stringify(payload)).digest('hex');
       headers['x-wa-hub-signature'] = signature;
+    }
+    if (config.webhookProtectionBypass) {
+      headers['x-vercel-protection-bypass'] = config.webhookProtectionBypass;
     }
     await axios.post(instance.webhookUrl, payload, { headers });
     instance.lastWebhookEvent = event;

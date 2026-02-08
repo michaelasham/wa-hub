@@ -12,6 +12,8 @@ const config = {
   // Webhook configuration
   webhookBaseUrl: process.env.MAIN_APP_WEBHOOK_BASE || process.env.WEBHOOK_BASE_URL,
   webhookSecret: process.env.WEBHOOK_SECRET || process.env.MAIN_APP_WEBHOOK_SECRET,
+  // Optional: bypass deployment protection (e.g. Vercel) - send this header with webhook POSTs
+  webhookProtectionBypass: process.env.WEBHOOK_PROTECTION_BYPASS || process.env.VERCEL_AUTOMATION_BYPASS_SECRET,
   
   // API key for authentication (required for all endpoints except /health)
   apiKey: process.env.API_KEY,

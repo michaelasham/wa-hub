@@ -36,5 +36,8 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
+  // Exclude webhook - must be fully public for wa-hub server-to-server POSTs (no cookies)
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|api/wahub/webhook|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+  ],
 };
