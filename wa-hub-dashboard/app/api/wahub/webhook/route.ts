@@ -22,14 +22,10 @@ export async function POST(request: NextRequest) {
 
   const event = payload.event ?? 'unknown';
   const instanceId = payload.instanceId ?? null;
-  const data = payload.data as { status?: string; message?: unknown; vote?: unknown } | undefined;
-  // Console log for testing: message and vote_update webhooks
-  if (event === 'message' && data?.message) {
-    console.log(`[webhook] message @ ${instanceId}:`, JSON.stringify(data.message));
+  if (event === 'message' || event === 'vote_update') {
+    console.log(`[webhook] ${event} @ ${instanceId ?? 'global'}:`, JSON.stringify(payload.data));
   }
-  if (event === 'vote_update' && data?.vote) {
-    console.log(`[webhook] vote_update @ ${instanceId}:`, JSON.stringify(data.vote));
-  }
+  const data = payload.data as { status?: string } | undefined;
   const rank = lifecycleRankFromEvent(event, data);
   const summary =
     event === 'change_state' && data?.status
