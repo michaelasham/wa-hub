@@ -835,33 +835,38 @@ function setupEventListeners(instanceId, client) {
     }
   }
 
+  /**
+   * Check contact info (client.info + getState). If both pass, mark ready.
+   * Called immediately on authenticated and then every READY_POLL_INTERVAL_MS.
+   */
+  async function checkContactInfoAndMaybeReady() {
+    if (!instances.has(instanceId) || instance.state === InstanceState.READY) return;
+    if (!instance.authenticatedAt) return;
+    instance.readyPollAttempts = (instance.readyPollAttempts || 0) + 1;
+    try {
+      const info = client.info;
+      if (!info) return;
+      const state = await client.getState();
+      if (!state || typeof state !== 'string' || state.length === 0) {
+        instance.lastReadyPollError = 'getState returned empty';
+        return;
+      }
+      instance.lastReadyPollError = null;
+      console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info + getState ok, treating as ready`);
+      instance.clearReadyPoll();
+      markReady('poll');
+    } catch (e) {
+      instance.lastReadyPollError = e.message;
+    }
+  }
+
   // Fallback: poll client.info + getState when ready event never fires (whatsapp-web.js bug)
   function startReadyPoll() {
     instance.clearReadyPoll();
-    instance.readyPollTimer = setInterval(async () => {
-      if (!instances.has(instanceId) || instance.state === InstanceState.READY) {
-        instance.clearReadyPoll();
-        return;
-      }
-      // Only allow poll-based ready after we've seen authenticated
-      if (!instance.authenticatedAt) return;
-      instance.readyPollAttempts = (instance.readyPollAttempts || 0) + 1;
-      try {
-        const info = client.info;
-        if (!info) return;
-        const state = await client.getState();
-        if (!state || typeof state !== 'string' || state.length === 0) {
-          instance.lastReadyPollError = 'getState returned empty';
-          return;
-        }
-        instance.lastReadyPollError = null;
-        console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info + getState ok, treating as ready`);
-        instance.clearReadyPoll();
-        markReady('poll');
-      } catch (e) {
-        instance.lastReadyPollError = e.message;
-        // Keep polling
-      }
+    // Always check immediately when status is authenticated, then every interval
+    void checkContactInfoAndMaybeReady().catch(() => {});
+    instance.readyPollTimer = setInterval(() => {
+      void checkContactInfoAndMaybeReady().catch(() => {});
     }, config.readyPollIntervalMs);
   }
 
@@ -886,7 +891,7 @@ function setupEventListeners(instanceId, client) {
     instance.clearConnectingWatchdog();
     instance.connectingWatchdogRestartCount = 0; // Progress: authenticated
     instance.startReadyWatchdog();
-    startReadyPoll();
+    startReadyPoll(); // Runs immediate check + interval
     void forwardWebhook(instanceId, 'authenticated', {}).catch(err => recordWebhookError(instanceId, err));
   });
   

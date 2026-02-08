@@ -7,6 +7,7 @@ import { waHubRequest } from '@/lib/wahubClient';
 
 /**
  * QR Panel - webhook-driven primary; auto-fetch from API when webhooks fail (e.g. 401).
+ * Hidden when status is ready or authenticating (syncing/initializing).
  */
 export function QrPanel({
   instanceId,
@@ -15,8 +16,16 @@ export function QrPanel({
 }: {
   instanceId: string;
   events: SseEvent[];
-  status: Record<string, unknown> | null;
+  status?: Record<string, unknown> | null;
 }) {
+  const isReady =
+    status?.state === 'ready' || (status?.instanceStatus as string) === 'ready';
+  const isAuthenticating =
+    status?.state === 'connecting' ||
+    (status?.instanceStatus as string) === 'initializing';
+  const hideQrSection = isReady || isAuthenticating;
+
+  if (hideQrSection) return null;
   const [qrFromApi, setQrFromApi] = useState<string | null>(null);
 
   const qrFromWebhooks = useMemo(() => {
@@ -51,9 +60,9 @@ export function QrPanel({
 
   const qr = qrFromWebhooks ?? qrFromApi;
 
-  const needsQr =
-    (status?.instanceStatus as string) === 'qr' ||
-    (status?.state as string) === 'needs_qr';
+  // Derive needs_qr from webhook events (webhook-only, no status polling)
+  const lastWh = events.find((e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === instanceId)?.data as { event?: string } | undefined;
+  const needsQr = lastWh?.event === 'qr';
 
   // Auto-fetch QR from API only when status is needs_qr and webhooks don't have it
   useEffect(() => {

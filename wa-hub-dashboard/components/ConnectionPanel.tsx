@@ -42,16 +42,22 @@ export function ConnectionPanel({
     (status?.state as string) ??
     'unknown';
 
-  const rank =
-    lastWebhook?.event === 'ready'
-      ? 3
-      : lastWebhook?.event === 'authenticated'
-      ? 2
-      : lastWebhook?.event === 'qr'
-      ? 1
-      : lastWebhook?.event === 'disconnected' || lastWebhook?.event === 'auth_failure'
-      ? 0
-      : 1;
+  const statusIsReady =
+    displayStatus === 'ready' ||
+    status?.state === 'ready' ||
+    (status?.instanceStatus as string) === 'ready';
+
+  const rank = statusIsReady
+    ? 3
+    : lastWebhook?.event === 'ready'
+    ? 3
+    : lastWebhook?.event === 'authenticated'
+    ? 2
+    : lastWebhook?.event === 'qr'
+    ? 1
+    : lastWebhook?.event === 'disconnected' || lastWebhook?.event === 'auth_failure'
+    ? 0
+    : 1;
 
   const getLifecycleBadge = (rank: number) => {
     switch (rank) {
