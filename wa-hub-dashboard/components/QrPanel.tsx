@@ -18,9 +18,17 @@ export function QrPanel({
   events: SseEvent[];
   status?: Record<string, unknown> | null;
 }) {
+  // Same source of truth as ConnectionPanel: webhooks first, then API status
+  const lastWh = events.find(
+    (e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === instanceId
+  )?.data as { event?: string } | undefined;
+  const lastWebhookEvent = lastWh?.event;
   const isReady =
-    status?.state === 'ready' || (status?.instanceStatus as string) === 'ready';
+    lastWebhookEvent === 'ready' ||
+    status?.state === 'ready' ||
+    (status?.instanceStatus as string) === 'ready';
   const isAuthenticating =
+    lastWebhookEvent === 'authenticated' ||
     status?.state === 'connecting' ||
     (status?.instanceStatus as string) === 'initializing';
   const hideQrSection = isReady || isAuthenticating;

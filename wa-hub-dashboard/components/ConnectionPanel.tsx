@@ -42,14 +42,14 @@ export function ConnectionPanel({
     (status?.state as string) ??
     'unknown';
 
+  // Single source of truth: webhooks first, then API status
   const statusIsReady =
     displayStatus === 'ready' ||
+    lastWebhook?.event === 'ready' ||
     status?.state === 'ready' ||
     (status?.instanceStatus as string) === 'ready';
 
   const rank = statusIsReady
-    ? 3
-    : lastWebhook?.event === 'ready'
     ? 3
     : lastWebhook?.event === 'authenticated'
     ? 2
