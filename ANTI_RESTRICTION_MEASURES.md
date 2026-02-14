@@ -299,6 +299,34 @@ await waitForReadyEvent(instanceId);  // Event-driven, not polling
 
 ---
 
+## 13. 👁️ Selective Read Receipts (Blue Ticks)
+
+**Purpose:** Mark chats as "seen" selectively to appear human-like without marking every message (which can look automated).
+
+**Implementation:**
+- **After bot sends:** Mark chat as seen with 1-3s random delay. Low-risk: we just interacted with the thread.
+- **On incoming:** Only for "order-related" messages (keywords, quoted replies, poll votes), ~40% probability, 2-6s reading delay.
+- Keep `sendSeen: false` on all `sendMessage` calls - we control when to mark seen manually.
+- All `sendSeen()` calls wrapped in try/catch (log, never crash).
+
+**Why It Helps:**
+- Natural: humans read and mark seen; bots often don't or mark everything instantly.
+- Selective: avoids marking unrelated chats (owner's manual support) or every message.
+- Probabilistic + delayed: reduces predictable patterns.
+
+**Configuration:**
+```env
+MARK_SEEN_AFTER_SEND=true
+MARK_SEEN_ON_RELEVANT_INCOMING=true
+MARK_SEEN_PROBABILITY_INCOMING=0.4
+MARK_SEEN_AFTER_SEND_DELAY_MIN_MS=1000
+MARK_SEEN_AFTER_SEND_DELAY_MAX_MS=3000
+READING_DELAY_MIN_MS=2000
+READING_DELAY_MAX_MS=6000
+```
+
+---
+
 ## 📊 Summary Table
 
 | Measure | Purpose | Default Behavior | Prevents |
@@ -313,6 +341,7 @@ await waitForReadyEvent(instanceId);  // Event-driven, not polling
 | **Event-Driven** | No polling | Wait for events | Aggressive status checks |
 | **Per-Instance Auth** | Isolation | Separate sessions | Session conflicts |
 | **Queue Persistence** | No message loss | Survives restarts | Lost messages |
+| **Selective Read Receipts** | Human-like seen | After send + ~40% on relevant incoming | Instant/global seen patterns |
 
 ---
 

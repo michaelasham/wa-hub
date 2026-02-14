@@ -12,6 +12,8 @@ const config = require('./config');
 const { qrToBase64, extractPhoneNumber, sanitizeInstanceId } = require('./utils');
 const idempotencyStore = require('./idempotency-store');
 const { withTypingIndicator } = require('./utils/typingIndicator');
+const { startPopupDismisser } = require('./utils/whatsappWebPopupDismisser');
+const { markSeenAfterSend, markSeenOnRelevantIncoming } = require('./utils/selectiveSeen');
 
 /**
  * Debug patch: structured JSON log for debugging disconnect/ready delays
@@ -33,6 +35,8 @@ const InstanceState = {
   DISCONNECTED: 'disconnected',
   NEEDS_QR: 'needs_qr',
   ERROR: 'error',
+  RESTRICTED: 'restricted',  // Detected restriction - long cooldown, no reconnect
+  PAUSED: 'paused',          // Cooldown or rate limit - pause sends, no reconnect until window expires
 };
 
 /**
@@ -155,6 +159,19 @@ class InstanceContext {
 
     // Listener attachment tracking (diagnostics)
     this.listenersAttached = false;
+
+    // Disconnect cooldown: no reconnect/sends until this timestamp
+    this.disconnectCooldownUntil = null;
+    // Restriction cooldown: 72h pause when restriction detected
+    this.restrictedUntil = null;
+    // Zombie detection: last activity timestamp (send or incoming message)
+    this.lastActivityAt = null;
+    // Health check timer
+    this.healthCheckTimer = null;
+    // Ready timeout: pause until this before retry (instead of immediate soft restart)
+    this.readyTimeoutPauseUntil = null;
+    // Scheduled ensureReady after disconnect cooldown
+    this.disconnectCooldownTimer = null;
   }
   
   /**
@@ -172,11 +189,15 @@ class InstanceContext {
     // Handle state-specific actions
     if (newState === InstanceState.READY) {
       this.lastReadyAt = new Date();
+      this.lastActivityAt = new Date();
       this.restartAttempts = 0; // Reset on successful ready
       this.restartHistory = []; // Clear restart history
       this.connectingWatchdogRestartCount = 0;
+      this.disconnectCooldownUntil = null;
       this.clearReadyWatchdog();
       this.clearConnectingWatchdog();
+      this.clearHealthCheck();
+      startHealthCheck(this.id);
       if (this.authenticatedAt) {
         const ms = this.lastReadyAt - this.authenticatedAt;
         debugLog(this.id, 'ready_after_authenticated_ms', { ms, authenticatedAt: this.authenticatedAt.toISOString() });
@@ -198,6 +219,7 @@ class InstanceContext {
       }
     } else if (newState === InstanceState.DISCONNECTED) {
       this.lastDisconnectAt = new Date();
+      this.clearHealthCheck();
       // Stop send loop
       stopSendLoop(this.id);
       // Reject ready promise if waiting
@@ -210,11 +232,13 @@ class InstanceContext {
           this.readyTimeout = null;
         }
       }
-    } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR) {
-      // Stop send loop on terminal states
+    } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR || newState === InstanceState.RESTRICTED || newState === InstanceState.PAUSED) {
+      // Stop send loop on terminal / hold states
       stopSendLoop(this.id);
-      this.clearConnectingWatchdog();
-      this.connectingWatchdogRestartCount = 0;
+      if (newState !== InstanceState.PAUSED) {
+        this.clearConnectingWatchdog();
+        this.connectingWatchdogRestartCount = 0;
+      }
       // Reject ready promise so createInstance can return when QR is received (QR = success for init)
       if (this.readyRejector) {
         this.readyRejector(new Error(`Instance in ${newState} state`));
@@ -366,6 +390,26 @@ class InstanceContext {
   }
 
   /**
+   * Clear scheduled ensureReady after disconnect cooldown
+   */
+  clearDisconnectCooldownTimer() {
+    if (this.disconnectCooldownTimer) {
+      clearTimeout(this.disconnectCooldownTimer);
+      this.disconnectCooldownTimer = null;
+    }
+  }
+
+  /**
+   * Clear health check timer
+   */
+  clearHealthCheck() {
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
+  }
+
+  /**
    * Fallback: clear message poller (unread messages when message events fail)
    */
   clearMessageFallbackPoller() {
@@ -434,42 +478,93 @@ class InstanceContext {
 // Instance storage
 const instances = new Map();
 
+/** Restriction-like phrases in disconnect reason or page content */
+const RESTRICTION_INDICATORS = ['restricted', '24 hours', '24h', 'logout', 'conflict', 'timeout', 'your account is restricted', 'account restricted'];
+
 /**
- * Debug patch: called when ready watchdog fires (ready not received within timeout)
+ * Check if disconnect reason or text indicates WhatsApp restriction
+ * @param {string} reasonOrText - disconnect reason or page content
+ * @returns {boolean}
+ */
+function looksLikeRestriction(reasonOrText) {
+  if (!reasonOrText || typeof reasonOrText !== 'string') return false;
+  const lower = reasonOrText.toLowerCase();
+  return RESTRICTION_INDICATORS.some(term => lower.includes(term));
+}
+
+/**
+ * Ready watchdog: ready event not fired within timeout.
+ * New behavior: log, pause 10min, retry ensureReady only if queue has pending messages.
  */
 async function onReadyWatchdogTimeout(instanceId) {
   const instance = instances.get(instanceId);
   if (!instance || instance.state === InstanceState.READY) return;
 
   const elapsedMs = instance.readyWatchdogStartAt ? Date.now() - instance.readyWatchdogStartAt.getTime() : 0;
+  const pauseMin = config.readyTimeoutPauseMin || 10;
   debugLog(instanceId, 'ready_timeout', {
     elapsedMs,
     authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
     state: instance.state,
   });
-  console.error(`[${instanceId}] ready_timeout: ready event not fired after ${elapsedMs}ms`);
+  console.error(`[${instanceId}] ready_timeout: ready event not fired after ${elapsedMs}ms - pausing ${pauseMin}min (no auto-restart)`);
   void forwardWebhook(instanceId, 'ready_timeout', {
     elapsedMs,
     authenticatedAt: instance.authenticatedAt ? instance.authenticatedAt.toISOString() : null,
     state: instance.state,
   }).catch(err => recordWebhookError(instanceId, err));
 
-  if (!instance.readyWatchdogRestarted) {
-    instance.readyWatchdogRestarted = true;
-    instance.clearReadyWatchdog();
-    instance.clearReadyPoll();
-    instance.clearMessageFallbackPoller();
-    console.log(`[${instanceId}] ready_timeout: restarting client once`);
-    try {
-      if (instance.client) {
-        await softRestartAndWaitReady(instanceId).catch(err => {
-          console.error(`[${instanceId}] ready_timeout restart failed:`, err.message);
-        });
-      }
-    } catch (err) {
-      console.error(`[${instanceId}] ready_timeout restart error:`, err);
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
+  instance.clearMessageFallbackPoller();
+  instance.readyTimeoutPauseUntil = new Date(Date.now() + pauseMin * 60000);
+
+  const pauseMs = pauseMin * 60000;
+  setTimeout(() => {
+    const inst = instances.get(instanceId);
+    if (!inst || inst.state === InstanceState.READY) return;
+    inst.readyTimeoutPauseUntil = null;
+    if (inst.queue.length === 0) {
+      console.log(`[${instanceId}] ready_timeout: pause expired, queue empty - skipping ensureReady (manual intervention preferred)`);
+      return;
     }
-  }
+    console.log(`[${instanceId}] ready_timeout: pause expired, ${inst.queue.length} queued - trying ensureReady`);
+    Promise.resolve(ensureReady(instanceId)).catch(err => {
+      console.error(`[${instanceId}] ready_timeout ensureReady failed:`, err.message);
+    });
+  }, pauseMs);
+}
+
+/**
+ * Start periodic health check when instance is READY (no auto-restart, zombie detection only)
+ */
+function startHealthCheck(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance || instance.state !== InstanceState.READY || instance.healthCheckTimer) return;
+
+  const intervalMs = (config.healthCheckIntervalMin || 20) * 60000;
+  const zombieMin = config.zombieInactivityThresholdMin || 30;
+
+  instance.healthCheckTimer = setInterval(() => {
+    const inst = instances.get(instanceId);
+    if (!inst || inst.state !== InstanceState.READY) return;
+
+    const last = inst.lastActivityAt?.getTime() || 0;
+    const inactiveMin = (Date.now() - last) / 60000;
+    if (inactiveMin > zombieMin) {
+      const pauseMin = config.zombieInactivityThresholdMin || 30;
+      console.warn(`[${instanceId}] health_check: no activity for ${Math.round(inactiveMin)}min despite READY (zombie?) - pausing sends ${pauseMin}min, notify admin. NO auto-restart.`);
+      inst.disconnectCooldownUntil = new Date(Date.now() + pauseMin * 60000);
+      inst.transitionTo(InstanceState.PAUSED, `Zombie? No activity for ${Math.round(inactiveMin)}min`);
+      void forwardWebhook(instanceId, 'health_check_zombie', {
+        inactiveMinutes: Math.round(inactiveMin),
+        message: 'No activity despite READY - manual intervention preferred',
+      }).catch(err => recordWebhookError(instanceId, err));
+      inst.clearHealthCheck();
+      return;
+    }
+    debugLog(instanceId, 'health_check', { inactiveMin: Math.round(inactiveMin * 10) / 10 });
+  }, intervalMs);
 }
 
 /**
@@ -581,6 +676,7 @@ const FALLBACK_MAX_CHATS_PER_TICK = 10;
 function processIncomingMessage(instanceId, message) {
   const instance = instances.get(instanceId);
   if (!instance || !instance.webhookUrl) return;
+  instance.lastActivityAt = new Date();
   const fromMe = message.fromMe === true || (message.id && message.id.fromMe === true);
   if (fromMe) return; // Ignore outgoing for incoming webhooks
 
@@ -602,6 +698,12 @@ function processIncomingMessage(instanceId, message) {
 
   const messageData = { message: serializeMessage(message) };
   void forwardWebhook(instanceId, 'message', messageData).catch(err => recordWebhookError(instanceId, err));
+
+  // Selective read receipt: ~40% probability for order-related incoming, 2-6s reading delay
+  const instanceRef = instances.get(instanceId);
+  if (instanceRef?.client) {
+    void markSeenOnRelevantIncoming(instanceRef.client, message, `[${instanceId}]`).catch(() => {});
+  }
 }
 
 /**
@@ -1051,7 +1153,7 @@ function setupEventListeners(instanceId, client) {
     void forwardWebhook(instanceId, 'auth_failure', { message: msg }).catch(err => recordWebhookError(instanceId, err));
   });
   
-  // Disconnected - state transition in handler, webhook fire-and-forget
+  // Disconnected - aggressive cooldown, restriction detection, no immediate reconnect
   client.on('disconnected', (reason) => {
     if (guard()) return;
     const reasonStr = reason || 'unknown';
@@ -1066,24 +1168,60 @@ function setupEventListeners(instanceId, client) {
     instance.clearReadyWatchdog();
     instance.clearReadyPoll();
     instance.clearMessageFallbackPoller();
+    instance.clearDisconnectCooldownTimer();
     stopSendLoop(instanceId);
+
+    // 1. Restriction detection: force 72h full pause, no reconnect
+    if (looksLikeRestriction(reasonStr)) {
+      const hours = config.extendedRestrictionCooldownHours;
+      instance.restrictedUntil = new Date(Date.now() + hours * 3600000);
+      instance.transitionTo(InstanceState.RESTRICTED, `Restriction detected: ${reasonStr}`);
+      const msg = `24h+ hold to avoid escalation. No reconnect for ${hours}h. Manual intervention required.`;
+      console.error(`[${instanceId}] RESTRICTED: ${msg}`);
+      void forwardWebhook(instanceId, 'restricted', {
+        reason: reasonStr,
+        restrictedUntil: instance.restrictedUntil.toISOString(),
+        message: msg,
+      }).catch(err => recordWebhookError(instanceId, err));
+      void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(err => recordWebhookError(instanceId, err));
+      return;
+    }
+
     const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
     const reasonUpper = reasonStr.toUpperCase();
     const isTerminal = terminalReasons.some(term => reasonUpper.includes(term));
+
     if (isTerminal) {
       instance.transitionTo(InstanceState.NEEDS_QR, `Terminal disconnect: ${reasonStr}`);
-    } else {
-      instance.transitionTo(InstanceState.DISCONNECTED, reasonStr);
-      // Auto-reconnect on non-terminal disconnect (skip if DISABLE_AUTO_RECONNECT)
-      if (!config.disableAutoReconnect && !instance.reconnectionLock && !instance.checkRestartRateLimit()) {
-        Promise.resolve(ensureReady(instanceId)).catch(err => {
-          console.error(`[${instanceId}] Auto-reconnect failed:`, err);
-        });
-      } else if (config.disableAutoReconnect) {
-        console.log(`[${instanceId}] Auto-reconnect disabled (DISABLE_AUTO_RECONNECT=true)`);
-      }
+      void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(err => recordWebhookError(instanceId, err));
+      return;
     }
-    void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(err => recordWebhookError(instanceId, err));
+
+    // 2. Non-terminal: aggressive cooldown - pause ALL sends + delay reconnect
+    if (config.disableAutoReconnect) {
+      instance.transitionTo(InstanceState.DISCONNECTED, reasonStr);
+      console.log(`[${instanceId}] Auto-reconnect disabled (DISABLE_AUTO_RECONNECT=true)`);
+      return;
+    }
+    const cooldownMs = config.minDisconnectCooldownMs;
+    instance.disconnectCooldownUntil = new Date(Date.now() + cooldownMs);
+    instance.transitionTo(InstanceState.PAUSED, `Disconnect cooldown: ${reasonStr}`);
+    console.log(`[${instanceId}] Disconnect cooldown: pausing ${cooldownMs / 60000}min before reconnect attempt`);
+
+    instance.disconnectCooldownTimer = setTimeout(() => {
+      instance.disconnectCooldownTimer = null;
+      const inst = instances.get(instanceId);
+      if (!inst || inst.state === InstanceState.RESTRICTED) return;
+      if (inst.restrictedUntil && Date.now() < inst.restrictedUntil.getTime()) return;
+      if (inst.checkRestartRateLimit()) {
+        console.log(`[${instanceId}] Cooldown expired but rate limit hit - staying PAUSED`);
+        return;
+      }
+      inst.transitionTo(InstanceState.DISCONNECTED, reasonStr);
+      Promise.resolve(ensureReady(instanceId)).catch(err => {
+        console.error(`[${instanceId}] Auto-reconnect after cooldown failed:`, err);
+      });
+    }, cooldownMs);
   });
   
   // State change (whatsapp-web.js internal state, not our InstanceState)
@@ -1152,7 +1290,7 @@ function waitForReadyEvent(instanceId, timeoutMs = config.readyTimeoutMs) {
   }
   
   // If terminal state, reject immediately
-  if (instance.state === InstanceState.NEEDS_QR || instance.state === InstanceState.ERROR) {
+  if (instance.state === InstanceState.NEEDS_QR || instance.state === InstanceState.ERROR || instance.state === InstanceState.RESTRICTED) {
     return Promise.reject(new Error(`Instance in terminal state: ${instance.state}`));
   }
   
@@ -1204,6 +1342,9 @@ async function softRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
       console.log(`[${instanceId}] Destroy error (ignoring):`, err.message);
     }
     
+    // Auto-dismiss popup when page reloads (runs in parallel with initialize)
+    startPopupDismisser(instance.client, `[${instanceId}]`);
+    
     // Reinitialize
     await instance.client.initialize();
     
@@ -1252,6 +1393,9 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
   // Setup event listeners
   setupEventListeners(instanceId, client);
   
+  // Auto-dismiss "A fresh look for WhatsApp Web" popup
+  startPopupDismisser(client, `[${instanceId}]`);
+  
   try {
     // Initialize
     await client.initialize();
@@ -1268,60 +1412,86 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
 
 /**
  * Ensure instance is ready (single-flight reconnection with ladder)
+ * Uses exponential backoff, rate limit → PAUSED, no reconnect when RESTRICTED.
  */
 async function ensureReady(instanceId) {
   const instance = instances.get(instanceId);
   if (!instance) {
     throw new Error(`Instance ${instanceId} not found`);
   }
-  
+
   // Terminal states: don't auto-restart
   if (instance.state === InstanceState.NEEDS_QR) {
     throw new Error(`Instance ${instanceId} needs QR code. Manual intervention required.`);
   }
-  
   if (instance.state === InstanceState.ERROR) {
     throw new Error(`Instance ${instanceId} is in ERROR state. Check logs.`);
   }
-  
+  if (instance.state === InstanceState.RESTRICTED) {
+    const until = instance.restrictedUntil?.toISOString() || 'unknown';
+    throw new Error(`Instance ${instanceId} is RESTRICTED until ${until}. No reconnect.`);
+  }
+
   // If ready, return immediately
   if (instance.state === InstanceState.READY) {
     return;
   }
-  
-  // Check rate limit
-  if (instance.checkRestartRateLimit()) {
-    instance.transitionTo(InstanceState.ERROR, 'Restart rate limit exceeded');
-    throw new Error(`Instance ${instanceId}: too many restart attempts. Rate limit exceeded.`);
+
+  // PAUSED: only proceed if cooldowns expired
+  if (instance.state === InstanceState.PAUSED) {
+    const now = Date.now();
+    if (instance.restrictedUntil && now < instance.restrictedUntil.getTime()) {
+      throw new Error(`Instance ${instanceId} in restriction cooldown until ${instance.restrictedUntil.toISOString()}`);
+    }
+    if (instance.disconnectCooldownUntil && now < instance.disconnectCooldownUntil.getTime()) {
+      throw new Error(`Instance ${instanceId} in disconnect cooldown until ${instance.disconnectCooldownUntil.toISOString()}`);
+    }
   }
-  
+
+  // Rate limit: transition to PAUSED for full window + extra, no reconnect
+  if (instance.checkRestartRateLimit()) {
+    const extraMs = config.restartRateLimitExtraHours * 3600000;
+    const windowMs = config.restartWindowMinutes * 60 * 1000;
+    instance.disconnectCooldownUntil = new Date(Date.now() + windowMs + extraMs);
+    instance.transitionTo(InstanceState.PAUSED, 'Restart rate limit exceeded');
+    const msg = `Rate limit: ${instance.restartHistory.length} restarts in ${config.restartWindowMinutes}min window. Paused for ${config.restartWindowMinutes}min + ${config.restartRateLimitExtraHours}h.`;
+    console.error(`[${instanceId}] ${msg}`);
+    throw new Error(`Instance ${instanceId}: ${msg}`);
+  }
+
   // Acquire lock (mutex)
   await instance.acquireLock();
-  
+
   try {
-    // Double-check state after acquiring lock
-    if (instance.state === InstanceState.READY) {
-      return;
-    }
-    
+    if (instance.state === InstanceState.READY) return;
+    if (instance.state === InstanceState.RESTRICTED) return;
+
     instance.recordRestartAttempt();
-    
+    const countInWindow = instance.restartHistory.length;
+    const seq = config.restartBackoffSequenceMs || [config.restartBackoffMs];
+    const backoffMs = seq[Math.min(countInWindow - 1, seq.length - 1)] ?? seq[seq.length - 1];
+    const backoffMin = Math.round(backoffMs / 60000);
+    console.log(`[${instanceId}] ensureReady: count=${countInWindow} in window, backoff=${backoffMin}min, attempt=soft`);
+
     // Attempt #1: Soft restart
     try {
-      await new Promise(resolve => setTimeout(resolve, config.restartBackoffMs));
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
       await softRestartAndWaitReady(instanceId);
-      return; // Success
+      console.log(`[${instanceId}] ensureReady: soft restart succeeded`);
+      return;
     } catch (softError) {
-      console.log(`[${instanceId}] Soft restart failed, trying hard restart...`);
+      const backoff2 = seq[Math.min(countInWindow, seq.length - 1)] ?? seq[seq.length - 1];
+      const backoff2Min = Math.round(backoff2 / 60000);
+      console.log(`[${instanceId}] ensureReady: soft failed, backoff=${backoff2Min}min, attempt=hard`);
+      await new Promise(resolve => setTimeout(resolve, backoff2));
     }
-    
+
     // Attempt #2: Hard restart
     try {
-      await new Promise(resolve => setTimeout(resolve, config.restartBackoffMs * 2));
       await hardRestartAndWaitReady(instanceId);
-      return; // Success
+      console.log(`[${instanceId}] ensureReady: hard restart succeeded`);
+      return;
     } catch (hardError) {
-      // Both failed
       if (instance.qrReceivedDuringRestart) {
         instance.transitionTo(InstanceState.NEEDS_QR, 'QR received during restart attempts');
       } else {
@@ -1368,7 +1538,9 @@ async function processQueueItem(instanceId, item) {
   
   // Ensure instance is ready
   if (instance.state !== InstanceState.READY) {
-    // Trigger ensureReady if not terminal
+    if (instance.state === InstanceState.PAUSED || instance.state === InstanceState.RESTRICTED) {
+      return false; // Defer - cooldown/restriction, no ensureReady (manual intervention preferred)
+    }
     if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
       console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), triggering ensureReady to reconnect`);
       Promise.resolve(ensureReady(instanceId)).catch(err => {
@@ -1422,6 +1594,10 @@ async function processQueueItem(instanceId, item) {
     const messageId = sentMessage?.id?._serialized || sentMessage?.id || null;
     await idempotencyStore.markSent(item.idempotencyKey, messageId);
     instance.recordSend();
+    instance.lastActivityAt = new Date();
+    
+    // Selective read receipt: mark chat as seen after bot sends (1-3s delay, natural)
+    void markSeenAfterSend(instance.client, item.payload.chatId, `[${instanceId}]`).catch(() => {});
     
     console.log(`[${instanceId}] ✓ Sent ${item.type} (idempotency: ${item.idempotencyKey.substring(0, 20)}..., messageId: ${messageId})`);
     return true; // Remove from queue
@@ -1639,6 +1815,9 @@ async function createInstance(instanceId, name, webhookConfig) {
       // Setup event listeners
       setupEventListeners(instanceId, client);
       
+      // Auto-dismiss "A fresh look for WhatsApp Web" popup (runs in parallel with initialize)
+      startPopupDismisser(client, `[${instanceId}]`);
+      
       // Small delay to let browser process stabilize
       if (attempt > 1) {
         await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
@@ -1804,8 +1983,8 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
     });
   } else {
     console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), will attempt to make it ready`);
-    // Trigger ensureReady if not terminal (safety net - sendMessage/sendPoll also do this)
-    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+    // Trigger ensureReady if not terminal/paused (safety net - sendMessage/sendPoll also do this)
+    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
       Promise.resolve(ensureReady(instanceId)).catch(err => {
         console.error(`[${instanceId}] ensureReady failed in enqueueItem:`, err);
       });
@@ -1851,13 +2030,13 @@ async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
   const itemAge = Date.now() - new Date(item.createdAt).getTime();
   const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
   
-  // Trigger reconnection if not terminal (only if newly queued)
-  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+  // Trigger reconnection if not terminal/paused (only if newly queued)
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
   }
-  
+
   return {
     status: 'queued',
     instanceState: instance.state,
@@ -1902,13 +2081,13 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, i
   const itemAge = Date.now() - new Date(item.createdAt).getTime();
   const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
   
-  // Trigger reconnection if not terminal (only if newly queued)
-  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+  // Trigger reconnection if not terminal/paused (only if newly queued)
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
   }
-  
+
   return {
     status: 'queued',
     instanceState: instance.state,
@@ -1993,6 +2172,8 @@ async function deleteInstance(instanceId) {
     instance.clearReadyPoll();
     instance.clearMessageFallbackPoller();
     instance.clearConnectingWatchdog();
+    instance.clearHealthCheck();
+    instance.clearDisconnectCooldownTimer();
     stopSendLoop(instanceId);
 
     const client = instance.client;

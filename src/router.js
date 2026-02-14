@@ -29,6 +29,8 @@ function mapInstanceStateToStatus(state) {
     [InstanceState.DISCONNECTED]: 'disconnected',
     [InstanceState.NEEDS_QR]: 'qr',
     [InstanceState.ERROR]: 'disconnected',
+    [InstanceState.RESTRICTED]: 'restricted',
+    [InstanceState.PAUSED]: 'paused',
   };
   return stateMap[state] || 'disconnected';
 }

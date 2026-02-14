@@ -36,9 +36,11 @@ const config = {
   // Instance lifecycle configuration
   maxQueueSize: parseInt(process.env.MAX_QUEUE_SIZE || '200', 10),
   readyTimeoutMs: parseInt(process.env.READY_TIMEOUT_MS || '180000', 10), // 3 minutes
-  restartBackoffMs: parseInt(process.env.RESTART_BACKOFF_MS || '2000', 10), // 2 seconds initial
-  maxRestartsPerWindow: parseInt(process.env.MAX_RESTARTS_PER_WINDOW || '4', 10),
-  restartWindowMinutes: parseInt(process.env.RESTART_WINDOW_MINUTES || '10', 10),
+  restartBackoffMs: parseInt(process.env.RESTART_BACKOFF_MS || '300000', 10), // 5 min initial (was 2s)
+  maxRestartsPerWindow: parseInt(process.env.MAX_RESTARTS_PER_WINDOW || '2', 10),
+  restartWindowMinutes: parseInt(process.env.RESTART_WINDOW_MINUTES || '60', 10),
+  restartBackoffSequenceMs: (process.env.RESTART_BACKOFF_SEQUENCE_MS || '300000,900000,3600000').split(',').map(s => parseInt(s.trim(), 10)), // 5min, 15min, 60min
+  restartRateLimitExtraHours: parseInt(process.env.RESTART_RATE_LIMIT_EXTRA_HOURS || '1', 10), // +1h pause on rate limit hit
   
   // Soft/Hard restart timeouts
   softRestartTimeoutMs: parseInt(process.env.SOFT_RESTART_TIMEOUT_MS || '180000', 10), // 3 minutes
@@ -48,8 +50,8 @@ const config = {
   initTimeoutMs: parseInt(process.env.INIT_TIMEOUT_MS || '120000', 10), // 2 minutes default
   
   // Rate limiting (per instance)
-  maxSendsPerMinute: parseInt(process.env.MAX_SENDS_PER_MINUTE_PER_INSTANCE || '6', 10),
-  maxSendsPerHour: parseInt(process.env.MAX_SENDS_PER_HOUR_PER_INSTANCE || '60', 10),
+  maxSendsPerMinute: parseInt(process.env.MAX_SENDS_PER_MINUTE_PER_INSTANCE || '3', 10),
+  maxSendsPerHour: parseInt(process.env.MAX_SENDS_PER_HOUR_PER_INSTANCE || '30', 10),
   
   // Retry backoff
   retryBaseBackoffMs: parseInt(process.env.RETRY_BASE_BACKOFF_MS || '5000', 10),
@@ -60,9 +62,18 @@ const config = {
   
   // Typing indicator configuration
   typingIndicatorEnabledDefault: process.env.TYPING_INDICATOR_ENABLED_DEFAULT !== 'false', // Default: true (enabled)
-  typingIndicatorMinMs: parseInt(process.env.TYPING_INDICATOR_MIN_MS || '600', 10),
-  typingIndicatorMaxMs: parseInt(process.env.TYPING_INDICATOR_MAX_MS || '1800', 10),
-  typingIndicatorMaxTotalMs: parseInt(process.env.TYPING_INDICATOR_MAX_TOTAL_MS || '2500', 10),
+  typingIndicatorMinMs: parseInt(process.env.TYPING_INDICATOR_MIN_MS || '1000', 10), // 1 second
+  typingIndicatorMaxMs: parseInt(process.env.TYPING_INDICATOR_MAX_MS || '3000', 10), // 3 seconds
+  typingIndicatorMaxTotalMs: parseInt(process.env.TYPING_INDICATOR_MAX_TOTAL_MS || '4500', 10), // typing + send buffer
+
+  // Selective read receipts (blue ticks) - humanity layer, low-risk
+  markSeenAfterSend: process.env.MARK_SEEN_AFTER_SEND !== 'false', // Default: true
+  markSeenOnRelevantIncoming: process.env.MARK_SEEN_ON_RELEVANT_INCOMING !== 'false', // Default: true
+  markSeenProbabilityIncoming: parseFloat(process.env.MARK_SEEN_PROBABILITY_INCOMING || '0.4', 10), // 0-1
+  markSeenAfterSendDelayMinMs: parseInt(process.env.MARK_SEEN_AFTER_SEND_DELAY_MIN_MS || '1000', 10), // 1-3s
+  markSeenAfterSendDelayMaxMs: parseInt(process.env.MARK_SEEN_AFTER_SEND_DELAY_MAX_MS || '3000', 10),
+  readingDelayMinMs: parseInt(process.env.READING_DELAY_MIN_MS || '2000', 10), // 2-6s
+  readingDelayMaxMs: parseInt(process.env.READING_DELAY_MAX_MS || '6000', 10),
   
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',
@@ -80,9 +91,20 @@ const config = {
   messageFallbackPollIntervalMs: parseInt(process.env.MESSAGE_FALLBACK_POLL_INTERVAL_MS || '15000', 10), // 15 sec default
   messageFallbackPollEnabled: process.env.MESSAGE_FALLBACK_POLL_ENABLED !== 'false', // Default: true
 
-  // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client
-  connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '180000', 10), // 3 min default
-  connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '3', 10), // After this many, move to ERROR
+  // Watchdog: if CONNECTING or NEEDS_QR for this long with no progress, restart client (extended for low reconnect frequency)
+  connectingWatchdogMs: parseInt(process.env.CONNECTING_WATCHDOG_MS || '600000', 10), // 10 min default (was 3)
+  connectingWatchdogMaxRestarts: parseInt(process.env.CONNECTING_WATCHDOG_MAX_RESTARTS || '2', 10), // After this many, move to ERROR
+
+  // Disconnect cooldown: pause ALL sends + auto-reconnect for this duration on ANY disconnect
+  minDisconnectCooldownMs: parseInt(process.env.MIN_DISCONNECT_COOLDOWN_MS || '300000', 10), // 5 min default
+
+  // Restriction: if detected (reason or page text), full pause for this many hours
+  extendedRestrictionCooldownHours: parseInt(process.env.EXTENDED_RESTRICTION_COOLDOWN_HOURS || '72', 10),
+
+  // Health check: periodic when READY (no auto-restart, just detect zombie)
+  healthCheckIntervalMin: parseInt(process.env.HEALTH_CHECK_INTERVAL_MIN || '20', 10),
+  zombieInactivityThresholdMin: parseInt(process.env.ZOMBIE_INACTIVITY_THRESHOLD_MIN || '30', 10),
+  readyTimeoutPauseMin: parseInt(process.env.READY_TIMEOUT_PAUSE_MIN || '10', 10), // Pause before retry on ready_timeout
 
   // Delete: timeout for client.destroy() before purge (ms)
   deleteDestroyTimeoutMs: parseInt(process.env.DELETE_DESTROY_TIMEOUT_MS || '15000', 10), // 15s default
