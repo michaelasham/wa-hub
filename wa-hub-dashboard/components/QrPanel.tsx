@@ -69,8 +69,7 @@ export function QrPanel({
   const qr = qrFromWebhooks ?? qrFromApi;
 
   // Derive needs_qr from webhook events (webhook-only, no status polling)
-  const lastWh = events.find((e) => e.type === 'webhook' && (e.data as { instanceId?: string }).instanceId === instanceId)?.data as { event?: string } | undefined;
-  const needsQr = lastWh?.event === 'qr';
+  const needsQr = lastWebhookEvent === 'qr';
 
   // Auto-fetch QR from API only when status is needs_qr and webhooks don't have it
   useEffect(() => {
