@@ -70,13 +70,18 @@ async function tryDismissPopup(page, logPrefix = '[wa-hub]') {
       return true;
     }
 
-    // XPath fallback
-    const xpathResult = await page.$x(
-      '//button[contains(translate(., "CONTINUE", "continue"), "continue")] | ' +
-      '//*[@role="button" and contains(translate(., "CONTINUE", "continue"), "continue")]'
-    );
-    if (xpathResult.length > 0) {
-      await xpathResult[0].click();
+    // XPath fallback (page.$x was removed in Puppeteer 22+, use evaluate)
+    const xpathClicked = await page.evaluate(() => {
+      const expr = '//button[contains(translate(., "CONTINUE", "continue"), "continue")] | //*[@role="button" and contains(translate(., "CONTINUE", "continue"), "continue")]';
+      const result = document.evaluate(expr, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      const node = result.singleNodeValue;
+      if (node) {
+        node.click();
+        return true;
+      }
+      return false;
+    });
+    if (xpathClicked) {
       console.log(`${logPrefix} [PopupDismisser] Clicked "Continue" (XPath)`);
       return true;
     }

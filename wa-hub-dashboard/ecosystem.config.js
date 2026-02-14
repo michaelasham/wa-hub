@@ -9,8 +9,8 @@ module.exports = {
   apps: [
     {
       name: 'wa-hub-dashboard',
-      script: 'node_modules/.bin/next',
-      args: 'start',
+      script: 'npm',
+      args: 'run start',
       cwd: '/home/michaelnasser321/wa-hub/wa-hub-dashboard',
       env: {
         PORT: 3001,
