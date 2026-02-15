@@ -871,6 +871,20 @@ router.post('/instances/:id/view-session', (req, res) => {
  * GET /view-session/screenshot
  * Returns PNG screenshot for valid view session token (founder-only, ephemeral).
  */
+/**
+ * POST /view-session/revoke
+ * Revoke view session token (stop polling, free token).
+ */
+router.post('/view-session/revoke', (req, res) => {
+  try {
+    const token = req.body?.token || req.query?.token;
+    const revoked = instanceManager.revokeViewSessionToken?.(token);
+    res.json(createSuccessResponse({ revoked: !!revoked }));
+  } catch (error) {
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
 router.get('/view-session/screenshot', async (req, res) => {
   try {
     const token = req.query?.token;
@@ -882,6 +896,57 @@ router.get('/view-session/screenshot', async (req, res) => {
   } catch (error) {
     console.error('Error capturing view session screenshot:', error);
     res.status(500).send();
+  }
+});
+
+/**
+ * POST /view-session/click
+ * Inject click at viewport coordinates (interactive view)
+ */
+router.post('/view-session/click', async (req, res) => {
+  try {
+    const token = req.body?.token || req.query?.token;
+    const x = req.body?.x;
+    const y = req.body?.y;
+    if (token == null || x == null || y == null) {
+      return res.status(400).json(createErrorResponse('token, x, and y are required', 400));
+    }
+    const result = await instanceManager.injectViewSessionClick?.(token, x, y);
+    if (!result) return res.status(500).json(createErrorResponse('Not supported', 500));
+    if (!result.success) {
+      const status = result.error?.includes('expired') ? 401 : result.error?.includes('not ready') ? 503 : 400;
+      return res.status(status).json(createErrorResponse(result.error || 'Click failed', status));
+    }
+    res.json(createSuccessResponse({ success: true }));
+  } catch (error) {
+    console.error('Error injecting click:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * POST /view-session/scroll
+ * Inject scroll at viewport coordinates (interactive view)
+ */
+router.post('/view-session/scroll', async (req, res) => {
+  try {
+    const token = req.body?.token || req.query?.token;
+    const x = req.body?.x;
+    const y = req.body?.y;
+    const deltaY = req.body?.deltaY ?? 0;
+    if (token == null || x == null || y == null) {
+      return res.status(400).json(createErrorResponse('token, x, and y are required', 400));
+    }
+    const result = await instanceManager.injectViewSessionScroll?.(token, x, y, deltaY);
+    if (!result) return res.status(500).json(createErrorResponse('Not supported', 500));
+    if (!result.success) {
+      const status = result.error?.includes('expired') ? 401 : result.error?.includes('not ready') ? 503 : 400;
+      return res.status(status).json(createErrorResponse(result.error || 'Scroll failed', status));
+    }
+    res.json(createSuccessResponse({ success: true }));
+  } catch (error) {
+    console.error('Error injecting scroll:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
   }
 });
 

@@ -65,7 +65,7 @@ export default function InstanceDetailPage() {
     }
   };
 
-  const handleViewLiveSession = async () => {
+  const handleViewLiveSession = async (interactive = false) => {
     try {
       const res = await fetch('/api/view-session/create', {
         method: 'POST',
@@ -79,7 +79,8 @@ export default function InstanceDetailPage() {
       const data = (await res.json().catch(() => ({}))) as { data?: { viewUrl?: string }; error?: string };
       const payload = data.data ?? data;
       if (res.ok && typeof payload === 'object' && payload && 'viewUrl' in payload) {
-        const viewUrl = (payload as { viewUrl?: string }).viewUrl;
+        let viewUrl = (payload as { viewUrl?: string }).viewUrl;
+        if (viewUrl && interactive) viewUrl = viewUrl.replace(/\/viewer\?/, '/viewer-interactive?');
         if (viewUrl) window.open(viewUrl, '_blank', 'noopener,noreferrer');
       } else {
         alert((payload as { error?: string })?.error ?? 'Failed to create view session');
@@ -150,7 +151,11 @@ export default function InstanceDetailPage() {
         secondaryActions={[
           {
             content: 'View Live Session',
-            onAction: handleViewLiveSession,
+            onAction: () => handleViewLiveSession(false),
+          },
+          {
+            content: 'View Interactive (Scroll/Read)',
+            onAction: () => handleViewLiveSession(true),
           },
           {
             content: connected ? 'SSE Connected' : 'SSE Disconnected',

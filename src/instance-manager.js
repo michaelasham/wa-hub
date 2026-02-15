@@ -2552,6 +2552,62 @@ async function captureViewSessionScreenshot(token) {
 }
 
 /**
+ * Inject click at coordinates (for interactive view).
+ * @param {string} token
+ * @param {number} x
+ * @param {number} y
+ * @returns {Promise<{ success: boolean; error?: string }>}
+ */
+async function injectViewSessionClick(token, x, y) {
+  const instanceId = validateViewSessionToken(token);
+  if (!instanceId) return { success: false, error: 'Invalid or expired token' };
+  const instance = instances.get(instanceId);
+  if (!instance?.client?.pupPage) return { success: false, error: 'Instance not ready' };
+  try {
+    const page = instance.client.pupPage;
+    if (page.isClosed?.()) return { success: false, error: 'Page closed' };
+    await page.mouse.click(Number(x), Number(y));
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || 'Click failed' };
+  }
+}
+
+/**
+ * Inject scroll at coordinates (for interactive view).
+ * @param {string} token
+ * @param {number} x
+ * @param {number} y
+ * @param {number} deltaY
+ * @returns {Promise<{ success: boolean; error?: string }>}
+ */
+async function injectViewSessionScroll(token, x, y, deltaY) {
+  const instanceId = validateViewSessionToken(token);
+  if (!instanceId) return { success: false, error: 'Invalid or expired token' };
+  const instance = instances.get(instanceId);
+  if (!instance?.client?.pupPage) return { success: false, error: 'Instance not ready' };
+  try {
+    const page = instance.client.pupPage;
+    if (page.isClosed?.()) return { success: false, error: 'Page closed' };
+    await page.mouse.move(Number(x), Number(y));
+    await page.mouse.wheel({ deltaY: Number(deltaY) || 0 });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || 'Scroll failed' };
+  }
+}
+
+/**
+ * Revoke a view session token (call when user closes viewer).
+ */
+function revokeViewSessionToken(token) {
+  if (!token || typeof token !== 'string') return false;
+  const had = viewTokens.has(token);
+  viewTokens.delete(token);
+  return had;
+}
+
+/**
  * Cleanup expired view tokens (call periodically)
  */
 function cleanupExpiredViewTokens() {
@@ -2582,5 +2638,8 @@ module.exports = {
   createViewSessionToken,
   validateViewSessionToken,
   captureViewSessionScreenshot,
+  injectViewSessionClick,
+  injectViewSessionScroll,
+  revokeViewSessionToken,
   cleanupExpiredViewTokens,
 };
