@@ -172,6 +172,9 @@ class InstanceContext {
     this.readyTimeoutPauseUntil = null;
     // Scheduled ensureReady after disconnect cooldown
     this.disconnectCooldownTimer = null;
+
+    // View Live Session (founder-only, ephemeral): wsEndpoint when viewSessionEnabled + remote-debugging
+    this.debugWsEndpoint = null;
   }
   
   /**
@@ -477,6 +480,9 @@ class InstanceContext {
 
 // Instance storage
 const instances = new Map();
+
+// View session tokens: ephemeral, founder-only (testing only)
+const viewTokens = new Map(); // token -> { instanceId, exp }
 
 /** Restriction-like phrases in disconnect reason or page content */
 const RESTRICTION_INDICATORS = ['restricted', '24 hours', '24h', 'logout', 'conflict', 'timeout', 'your account is restricted', 'account restricted'];
@@ -845,10 +851,8 @@ async function createClient(instanceId, instanceName) {
   
   // Build Puppeteer config with robust args for headless Linux environments
   // Keep args minimal to avoid conflicts that could cause "Execution context destroyed" errors
-  const puppeteerConfig = {
-    headless: true,
-    args: [
-      // Essential for headless Linux
+  const puppeteerArgs = [
+    // Essential for headless Linux
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -893,8 +897,17 @@ async function createClient(instanceId, instanceName) {
       
       // Cache size limits (prevent disk bloat)
       '--disk-cache-size=104857600', // 100MB disk cache limit
-      '--media-cache-size=104857600', // 100MB media cache limit (if supported)
-    ],
+    '--media-cache-size=104857600', // 100MB media cache limit (if supported)
+  ];
+
+  // View Live Session: optional remote debugging for founder-only testing (NOT for production by default)
+  if (config.viewSessionEnabled) {
+    puppeteerArgs.push('--remote-debugging-port=0'); // Random free port
+  }
+
+  const puppeteerConfig = {
+    headless: true,
+    args: puppeteerArgs,
   };
   
   // Use system Chromium when CHROME_PATH is set and exists (avoids Puppeteer bundled Chromium)
@@ -1002,6 +1015,12 @@ function setupEventListeners(instanceId, client) {
         console.error(`[${instanceId}] Error getting client info:`, error);
       }
       instance.transitionTo(InstanceState.READY);
+      if (config.viewSessionEnabled && client.pupBrowser) {
+        try {
+          const ws = client.pupBrowser.wsEndpoint?.();
+          if (ws) instance.debugWsEndpoint = ws;
+        } catch (_) { /* ignore */ }
+      }
       void forwardWebhook(instanceId, 'ready', { status: 'ready' }).catch(err =>
         recordWebhookError(instanceId, err)
       );
@@ -1384,6 +1403,7 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
       // Ignore errors
     }
     instance.client = null;
+    instance.debugWsEndpoint = null;
   }
   
   // Create new client
@@ -2477,6 +2497,76 @@ function getInstanceDiagnostics(instanceId) {
   };
 }
 
+/**
+ * Create a short-lived view session token for founder-only "View Live Session" (testing/debugging).
+ * Requires VIEW_SESSION_ENABLED and instance with debugWsEndpoint (remote debugging).
+ * @param {string} instanceId
+ * @param {string} dashboardBaseUrl - e.g. https://dashboard.example.com
+ * @returns {{ success: boolean; viewUrl?: string; expiresIn?: number; error?: string }}
+ */
+function createViewSessionToken(instanceId, dashboardBaseUrl) {
+  if (!config.viewSessionEnabled) {
+    return { success: false, error: 'View session is disabled (VIEW_SESSION_ENABLED=false)' };
+  }
+  const instance = instances.get(instanceId);
+  if (!instance) return { success: false, error: 'Instance not found' };
+  if (!instance.debugWsEndpoint) {
+    return { success: false, error: 'Instance has no debug session (remote debugging not available)' };
+  }
+  const expMs = config.viewSessionTimeoutMin * 60 * 1000;
+  const exp = Date.now() + expMs;
+  const token = crypto.randomBytes(32).toString('hex');
+  viewTokens.set(token, { instanceId, exp });
+  const viewUrl = `${dashboardBaseUrl.replace(/\/$/, '')}/viewer?token=${token}`;
+  console.log(`[${instanceId}] View session created (expires in ${config.viewSessionTimeoutMin}min)`);
+  return { success: true, viewUrl, expiresIn: config.viewSessionTimeoutMin * 60 };
+}
+
+/**
+ * Validate view session token and return instanceId or null.
+ * Cleans up expired tokens.
+ */
+function validateViewSessionToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const entry = viewTokens.get(token);
+  if (!entry) return null;
+  if (Date.now() > entry.exp) {
+    viewTokens.delete(token);
+    return null;
+  }
+  return entry.instanceId;
+}
+
+/**
+ * Capture screenshot for view session (founder-only, ephemeral).
+ * @param {string} token
+ * @returns {Promise<Buffer|null>} PNG buffer or null
+ */
+async function captureViewSessionScreenshot(token) {
+  const instanceId = validateViewSessionToken(token);
+  if (!instanceId) return null;
+  const instance = instances.get(instanceId);
+  if (!instance?.client?.pupPage) return null;
+  try {
+    const page = instance.client.pupPage;
+    if (page.isClosed?.()) return null;
+    return await page.screenshot({ type: 'png', fullPage: false });
+  } catch (err) {
+    console.warn(`[${instanceId}] View session screenshot failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Cleanup expired view tokens (call periodically)
+ */
+function cleanupExpiredViewTokens() {
+  const now = Date.now();
+  for (const [token, entry] of viewTokens.entries()) {
+    if (now > entry.exp) viewTokens.delete(token);
+  }
+}
+
 module.exports = {
   InstanceState,
   createInstance,
@@ -2495,4 +2585,8 @@ module.exports = {
   getQueueDetails,
   triggerSendLoop,
   getInstanceDiagnostics,
+  createViewSessionToken,
+  validateViewSessionToken,
+  captureViewSessionScreenshot,
+  cleanupExpiredViewTokens,
 };

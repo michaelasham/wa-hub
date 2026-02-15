@@ -837,6 +837,63 @@ router.get('/instances/:id/status', async (req, res) => {
 });
 
 /**
+ * POST /instances/:id/view-session
+ * Founder-only: Create short-lived view session (testing/debugging).
+ * Requires VIEW_SESSION_ENABLED. Logs access attempts.
+ */
+router.post('/instances/:id/view-session', (req, res) => {
+  try {
+    if (!config.viewSessionEnabled) {
+      console.log('[view-session] Access denied: VIEW_SESSION_ENABLED=false');
+      return res.status(403).json(createErrorResponse('View session is disabled', 403));
+    }
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+    const dashboardBaseUrl = req.body?.dashboardBaseUrl || req.query?.dashboardBaseUrl || '';
+    if (!dashboardBaseUrl || typeof dashboardBaseUrl !== 'string') {
+      return res.status(400).json(createErrorResponse('dashboardBaseUrl is required', 400));
+    }
+    console.log(`[view-session] Request for instance ${instanceId}`);
+    const result = instanceManager.createViewSessionToken(instanceId, dashboardBaseUrl);
+    if (!result.success) {
+      const status = result.error?.includes('disabled') ? 403 : result.error?.includes('not found') ? 404 : 400;
+      return res.status(status).json(createErrorResponse(result.error || 'Failed', status));
+    }
+    instanceManager.cleanupExpiredViewTokens?.();
+    res.json(createSuccessResponse({
+      viewUrl: result.viewUrl,
+      expiresIn: result.expiresIn,
+    }));
+  } catch (error) {
+    console.error('Error creating view session:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * GET /view-session/screenshot
+ * Returns PNG screenshot for valid view session token (founder-only, ephemeral).
+ */
+router.get('/view-session/screenshot', async (req, res) => {
+  try {
+    if (!config.viewSessionEnabled) {
+      return res.status(403).send();
+    }
+    const token = req.query?.token;
+    const buffer = await instanceManager.captureViewSessionScreenshot(token);
+    if (!buffer) {
+      return res.status(404).type('text/plain').send('View session expired or invalid');
+    }
+    res.type('image/png').send(buffer);
+  } catch (error) {
+    console.error('Error capturing view session screenshot:', error);
+    res.status(500).send();
+  }
+});
+
+/**
  * POST /instances/:id/restart
  * Manually trigger soft or hard restart (for admin use)
  */
