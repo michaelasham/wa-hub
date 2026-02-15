@@ -86,10 +86,15 @@ async function tryDismissPopup(page, logPrefix = '[wa-hub]') {
       return true;
     }
   } catch (err) {
-    // Don't crash - log and return false
-    if (!err.message?.includes('Target closed') && !err.message?.includes('Execution context was destroyed')) {
-      console.warn(`${logPrefix} [PopupDismisser] Error during dismiss attempt:`, err.message);
+    const msg = err?.message || '';
+    if (
+      msg.includes('Target closed') ||
+      msg.includes('Execution context was destroyed') ||
+      msg.includes('detached')
+    ) {
+      return false; // Page/frame detached, stop retrying silently
     }
+    console.warn(`${logPrefix} [PopupDismisser] Error during dismiss attempt:`, msg);
   }
   return false;
 }
@@ -105,9 +110,9 @@ async function runDismissLoop(page, logPrefix = '[wa-hub]') {
 
   while (Date.now() - start < MAX_DURATION_MS) {
     attempts++;
+    if (!page || page.isClosed?.()) return;
     const clicked = await tryDismissPopup(page, logPrefix);
     if (clicked) return;
-    if (!page || page.isClosed()) return;
     await new Promise((r) => setTimeout(r, RETRY_INTERVAL_MS));
   }
 
