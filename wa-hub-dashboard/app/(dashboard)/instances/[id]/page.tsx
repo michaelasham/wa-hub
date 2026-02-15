@@ -65,6 +65,30 @@ export default function InstanceDetailPage() {
     }
   };
 
+  const handleViewLiveSession = async () => {
+    try {
+      const res = await fetch('/api/view-session/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instanceId: id,
+          dashboardBaseUrl: typeof window !== 'undefined' ? window.location.origin : '',
+        }),
+        credentials: 'include',
+      });
+      const data = (await res.json().catch(() => ({}))) as { data?: { viewUrl?: string }; error?: string };
+      const payload = data.data ?? data;
+      if (res.ok && typeof payload === 'object' && payload && 'viewUrl' in payload) {
+        const viewUrl = (payload as { viewUrl?: string }).viewUrl;
+        if (viewUrl) window.open(viewUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        alert((payload as { error?: string })?.error ?? 'Failed to create view session');
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed');
+    }
+  };
+
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     router.push('/login');
@@ -124,6 +148,10 @@ export default function InstanceDetailPage() {
           onAction: handleDelete,
         }}
         secondaryActions={[
+          {
+            content: 'View Live Session',
+            onAction: handleViewLiveSession,
+          },
           {
             content: connected ? 'SSE Connected' : 'SSE Disconnected',
             disabled: true,

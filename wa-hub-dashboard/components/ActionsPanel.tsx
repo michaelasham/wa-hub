@@ -51,34 +51,6 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
     setLoading(false);
   };
 
-  const viewLiveSession = async () => {
-    setLoading(true);
-    setResult(null);
-    try {
-      const res = await fetch('/api/view-session/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instanceId,
-          dashboardBaseUrl: typeof window !== 'undefined' ? window.location.origin : '',
-        }),
-        credentials: 'include',
-      });
-      const data = (await res.json().catch(() => ({}))) as { data?: { viewUrl?: string }; error?: string };
-      const payload = data.data ?? data;
-      if (res.ok && typeof payload === 'object' && payload && 'viewUrl' in payload) {
-        const viewUrl = (payload as { viewUrl?: string }).viewUrl;
-        if (viewUrl) window.open(viewUrl, '_blank', 'noopener,noreferrer');
-        setResult({ ok: true, data: { viewUrl, message: 'Opened in new tab' }, status: res.status });
-      } else {
-        setResult({ ok: false, data: data, status: res.status });
-      }
-    } catch (e) {
-      setResult({ ok: false, data: { error: e instanceof Error ? e.message : 'Failed' }, status: 0 });
-    }
-    setLoading(false);
-  };
-
   const logout = async () => {
     if (!confirm('Logout this instance?')) return;
     setLoading(true);
@@ -98,19 +70,6 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
           Actions
         </Text>
         <BlockStack gap="400">
-          <div>
-            <Banner tone="info" title="Founder-only (testing/debugging)">
-              View Live Session streams a screenshot of the WhatsApp Web UI. Requires VIEW_SESSION_ENABLED on wa-hub.
-            </Banner>
-            <div style={{ marginTop: '0.5rem' }}>
-              <Button onClick={viewLiveSession} loading={loading}>
-                View Live Session (Testing)
-              </Button>
-            </div>
-          </div>
-
-          <Divider />
-
           <div>
             <Text variant="headingSm" as="h3" fontWeight="semibold">
               Send Message
