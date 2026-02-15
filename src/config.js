@@ -109,8 +109,8 @@ const config = {
   // Delete: timeout for client.destroy() before purge (ms)
   deleteDestroyTimeoutMs: parseInt(process.env.DELETE_DESTROY_TIMEOUT_MS || '15000', 10), // 15s default
 
-  // View Live Session (founder-only, testing/debugging) - strictly optional
-  viewSessionEnabled: process.env.VIEW_SESSION_ENABLED === 'true', // Default: false
+  // View Live Session (founder-only, testing/debugging) - always enabled
+  viewSessionEnabled: true,
   viewSessionTimeoutMin: parseInt(process.env.VIEW_SESSION_TIMEOUT_MIN || '10', 10),
   viewSessionJwtSecret: process.env.VIEW_SESSION_JWT_SECRET || process.env.WEBHOOK_SECRET || process.env.API_KEY || 'view-session-fallback',
 };

@@ -839,14 +839,9 @@ router.get('/instances/:id/status', async (req, res) => {
 /**
  * POST /instances/:id/view-session
  * Founder-only: Create short-lived view session (testing/debugging).
- * Requires VIEW_SESSION_ENABLED. Logs access attempts.
  */
 router.post('/instances/:id/view-session', (req, res) => {
   try {
-    if (!config.viewSessionEnabled) {
-      console.log('[view-session] Access denied: VIEW_SESSION_ENABLED=false');
-      return res.status(403).json(createErrorResponse('View session is disabled', 403));
-    }
     const instanceId = sanitizeInstanceId(getInstanceId(req.params));
     if (!isValidInstanceId(instanceId)) {
       return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
@@ -878,9 +873,6 @@ router.post('/instances/:id/view-session', (req, res) => {
  */
 router.get('/view-session/screenshot', async (req, res) => {
   try {
-    if (!config.viewSessionEnabled) {
-      return res.status(403).send();
-    }
     const token = req.query?.token;
     const buffer = await instanceManager.captureViewSessionScreenshot(token);
     if (!buffer) {

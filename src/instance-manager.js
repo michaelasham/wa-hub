@@ -900,10 +900,8 @@ async function createClient(instanceId, instanceName) {
     '--media-cache-size=104857600', // 100MB media cache limit (if supported)
   ];
 
-  // View Live Session: optional remote debugging for founder-only testing (NOT for production by default)
-  if (config.viewSessionEnabled) {
-    puppeteerArgs.push('--remote-debugging-port=0'); // Random free port
-  }
+  // View Live Session: remote debugging for founder-only testing (always enabled)
+  puppeteerArgs.push('--remote-debugging-port=0'); // Random free port
 
   const puppeteerConfig = {
     headless: true,
@@ -1015,7 +1013,7 @@ function setupEventListeners(instanceId, client) {
         console.error(`[${instanceId}] Error getting client info:`, error);
       }
       instance.transitionTo(InstanceState.READY);
-      if (config.viewSessionEnabled && client.pupBrowser) {
+      if (client.pupBrowser) {
         try {
           const ws = client.pupBrowser.wsEndpoint?.();
           if (ws) instance.debugWsEndpoint = ws;
@@ -2499,15 +2497,11 @@ function getInstanceDiagnostics(instanceId) {
 
 /**
  * Create a short-lived view session token for founder-only "View Live Session" (testing/debugging).
- * Requires VIEW_SESSION_ENABLED and instance with debugWsEndpoint (remote debugging).
  * @param {string} instanceId
  * @param {string} dashboardBaseUrl - e.g. https://dashboard.example.com
  * @returns {{ success: boolean; viewUrl?: string; expiresIn?: number; error?: string }}
  */
 function createViewSessionToken(instanceId, dashboardBaseUrl) {
-  if (!config.viewSessionEnabled) {
-    return { success: false, error: 'View session is disabled (VIEW_SESSION_ENABLED=false)' };
-  }
   const instance = instances.get(instanceId);
   if (!instance) return { success: false, error: 'Instance not found' };
   if (!instance.debugWsEndpoint) {
