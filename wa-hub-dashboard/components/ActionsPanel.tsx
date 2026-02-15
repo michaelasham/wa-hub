@@ -99,6 +99,19 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
         </Text>
         <BlockStack gap="400">
           <div>
+            <Banner tone="info" title="Founder-only (testing/debugging)">
+              View Live Session streams a screenshot of the WhatsApp Web UI. Requires VIEW_SESSION_ENABLED on wa-hub.
+            </Banner>
+            <div style={{ marginTop: '0.5rem' }}>
+              <Button onClick={viewLiveSession} loading={loading}>
+                View Live Session (Testing)
+              </Button>
+            </div>
+          </div>
+
+          <Divider />
+
+          <div>
             <Text variant="headingSm" as="h3" fontWeight="semibold">
               Send Message
             </Text>
@@ -157,20 +170,6 @@ export function ActionsPanel({ instanceId }: { instanceId: string }) {
                 Create Poll
               </Button>
             </BlockStack>
-          </div>
-
-          <Divider />
-
-          <div>
-            <Banner tone="info" title="Founder-only (testing/debugging)">
-              View Live Session streams a screenshot of the WhatsApp Web UI. Requires VIEW_SESSION_ENABLED on wa-hub.
-              Ephemeral, auto-expires.
-            </Banner>
-            <div style={{ marginTop: '0.5rem' }}>
-              <Button onClick={viewLiveSession} loading={loading}>
-                View Live Session (Testing)
-              </Button>
-            </div>
           </div>
 
           <Divider />
