@@ -172,6 +172,10 @@ class InstanceContext {
     this.readyTimeoutPauseUntil = null;
     // Scheduled ensureReady after disconnect cooldown
     this.disconnectCooldownTimer = null;
+    // Scheduled ensureReady after restart rate limit PAUSED
+    this.rateLimitWakeTimer = null;
+    // Idle health check: last time we logged idle (rate-limited)
+    this.lastIdleLogAt = null;
 
     // View Live Session (founder-only, ephemeral): wsEndpoint when viewSessionEnabled + remote-debugging
     this.debugWsEndpoint = null;
@@ -199,6 +203,8 @@ class InstanceContext {
       this.disconnectCooldownUntil = null;
       this.clearReadyWatchdog();
       this.clearConnectingWatchdog();
+      this.clearDisconnectCooldownTimer();
+      this.clearRateLimitWakeTimer();
       this.clearHealthCheck();
       startHealthCheck(this.id);
       if (this.authenticatedAt) {
@@ -240,6 +246,7 @@ class InstanceContext {
       stopSendLoop(this.id);
       if (newState !== InstanceState.PAUSED) {
         this.clearConnectingWatchdog();
+        this.clearRateLimitWakeTimer();
         this.connectingWatchdogRestartCount = 0;
       }
       // Reject ready promise so createInstance can return when QR is received (QR = success for init)
@@ -403,6 +410,16 @@ class InstanceContext {
   }
 
   /**
+   * Clear scheduled ensureReady after restart rate limit PAUSED
+   */
+  clearRateLimitWakeTimer() {
+    if (this.rateLimitWakeTimer) {
+      clearTimeout(this.rateLimitWakeTimer);
+      this.rateLimitWakeTimer = null;
+    }
+  }
+
+  /**
    * Clear health check timer
    */
   clearHealthCheck() {
@@ -541,32 +558,81 @@ async function onReadyWatchdogTimeout(instanceId) {
   }, pauseMs);
 }
 
+/** Idle log minimum interval (avoid spam for low-traffic instances) */
+const IDLE_LOG_INTERVAL_MS = 15 * 60 * 1000;
+
 /**
- * Start periodic health check when instance is READY (no auto-restart, zombie detection only)
+ * Start periodic health check when instance is READY.
+ * Warm mode: inactivity alone does NOT pause. We keep READY instances warm.
+ * If idle > threshold: log (rate-limited) and optionally run keepalive (getState).
+ * If keepalive fails: treat as real failure → PAUSED with disconnect-cooldown-like auto-wake.
  */
 function startHealthCheck(instanceId) {
   const instance = instances.get(instanceId);
   if (!instance || instance.state !== InstanceState.READY || instance.healthCheckTimer) return;
 
   const intervalMs = (config.healthCheckIntervalMin || 20) * 60000;
-  const zombieMin = config.zombieInactivityThresholdMin || 30;
+  const idleThresholdMin = config.zombieInactivityThresholdMin || 30;
 
-  instance.healthCheckTimer = setInterval(() => {
+  instance.healthCheckTimer = setInterval(async () => {
     const inst = instances.get(instanceId);
     if (!inst || inst.state !== InstanceState.READY) return;
 
     const last = inst.lastActivityAt?.getTime() || 0;
     const inactiveMin = (Date.now() - last) / 60000;
-    if (inactiveMin > zombieMin) {
-      const pauseMin = config.zombieInactivityThresholdMin || 30;
-      console.warn(`[${instanceId}] health_check: no activity for ${Math.round(inactiveMin)}min despite READY (zombie?) - pausing sends ${pauseMin}min, notify admin. NO auto-restart.`);
-      inst.disconnectCooldownUntil = new Date(Date.now() + pauseMin * 60000);
-      inst.transitionTo(InstanceState.PAUSED, `Zombie? No activity for ${Math.round(inactiveMin)}min`);
-      void forwardWebhook(instanceId, 'health_check_zombie', {
-        inactiveMinutes: Math.round(inactiveMin),
-        message: 'No activity despite READY - manual intervention preferred',
-      }).catch(err => recordWebhookError(instanceId, err));
-      inst.clearHealthCheck();
+
+    if (inactiveMin > idleThresholdMin) {
+      // Idle: do NOT pause. Log (rate-limited) and run keepalive check.
+      const now = Date.now();
+      const lastLog = inst.lastIdleLogAt?.getTime() || 0;
+      if (now - lastLog >= IDLE_LOG_INTERVAL_MS) {
+        inst.lastIdleLogAt = new Date();
+        console.log(`[${instanceId}] [HealthCheck] idle ${Math.round(inactiveMin)}m, keeping READY (warm mode)`);
+      }
+      debugLog(instanceId, 'health_check_idle', { inactiveMin: Math.round(inactiveMin * 10) / 10 });
+
+      // Soft keepalive: client.getState() (no messages sent)
+      if (inst.client) {
+        try {
+          await inst.client.getState();
+        } catch (err) {
+          // Real failure: treat like disconnect, PAUSE with auto-wake
+          console.warn(`[${instanceId}] [HealthCheck] keepalive failed: ${err?.message || err} - pausing with auto-wake`);
+          inst.clearHealthCheck();
+          const cooldownMs = config.minDisconnectCooldownMs;
+          inst.disconnectCooldownUntil = new Date(Date.now() + cooldownMs);
+          inst.transitionTo(InstanceState.PAUSED, `Health check keepalive failed: ${err?.message || err}`);
+          inst.disconnectCooldownTimer = setTimeout(() => {
+            inst.disconnectCooldownTimer = null;
+            const i = instances.get(instanceId);
+            if (!i || i.state === InstanceState.RESTRICTED) return;
+            if (i.restrictedUntil && Date.now() < i.restrictedUntil.getTime()) return;
+            if (i.checkRestartRateLimit()) {
+              const extraMs = config.restartRateLimitExtraHours * 3600000;
+              const windowMs = config.restartWindowMinutes * 60 * 1000;
+              const pauseMs = windowMs + extraMs;
+              const jitterMs = Math.floor(Math.random() * 31000);
+              i.disconnectCooldownUntil = new Date(Date.now() + pauseMs);
+              console.log(`[${instanceId}] Keepalive wake: rate limit hit - staying PAUSED, scheduling auto-wake in ${Math.round((pauseMs + jitterMs) / 60000)}min`);
+              i.clearRateLimitWakeTimer();
+              i.rateLimitWakeTimer = setTimeout(() => {
+                i.rateLimitWakeTimer = null;
+                const inst2 = instances.get(instanceId);
+                if (!inst2 || inst2.state === InstanceState.RESTRICTED) return;
+                console.log(`[${instanceId}] Rate limit wake (from keepalive): attempting ensureReady`);
+                Promise.resolve(ensureReady(instanceId)).catch(e => {
+                  console.error(`[${instanceId}] ensureReady after rate limit wake failed:`, e?.message);
+                });
+              }, pauseMs + jitterMs);
+              return;
+            }
+            i.transitionTo(InstanceState.DISCONNECTED, 'keepalive wake');
+            Promise.resolve(ensureReady(instanceId)).catch(e => {
+              console.error(`[${instanceId}] ensureReady after keepalive wake failed:`, e?.message);
+            });
+          }, cooldownMs);
+        }
+      }
       return;
     }
     debugLog(instanceId, 'health_check', { inactiveMin: Math.round(inactiveMin * 10) / 10 });
@@ -1231,7 +1297,22 @@ function setupEventListeners(instanceId, client) {
       if (!inst || inst.state === InstanceState.RESTRICTED) return;
       if (inst.restrictedUntil && Date.now() < inst.restrictedUntil.getTime()) return;
       if (inst.checkRestartRateLimit()) {
-        console.log(`[${instanceId}] Cooldown expired but rate limit hit - staying PAUSED`);
+        const extraMs = config.restartRateLimitExtraHours * 3600000;
+        const windowMs = config.restartWindowMinutes * 60 * 1000;
+        const pauseMs = windowMs + extraMs;
+        const jitterMs = Math.floor(Math.random() * 31000);
+        inst.disconnectCooldownUntil = new Date(Date.now() + pauseMs);
+        console.log(`[${instanceId}] Cooldown expired but rate limit hit - staying PAUSED, scheduling auto-wake in ${Math.round((pauseMs + jitterMs) / 60000)}min`);
+        inst.clearRateLimitWakeTimer();
+        inst.rateLimitWakeTimer = setTimeout(() => {
+          inst.rateLimitWakeTimer = null;
+          const i = instances.get(instanceId);
+          if (!i || i.state === InstanceState.RESTRICTED) return;
+          console.log(`[${instanceId}] Rate limit wake (from disconnect cooldown): attempting ensureReady`);
+          Promise.resolve(ensureReady(instanceId)).catch(err => {
+            console.error(`[${instanceId}] ensureReady after rate limit wake failed:`, err?.message);
+          });
+        }, pauseMs + jitterMs);
         return;
       }
       inst.transitionTo(InstanceState.DISCONNECTED, reasonStr);
@@ -1466,14 +1547,28 @@ async function ensureReady(instanceId) {
     }
   }
 
-  // Rate limit: transition to PAUSED for full window + extra, no reconnect
+  // Rate limit: transition to PAUSED for full window + extra, schedule auto-wake
   if (instance.checkRestartRateLimit()) {
     const extraMs = config.restartRateLimitExtraHours * 3600000;
     const windowMs = config.restartWindowMinutes * 60 * 1000;
-    instance.disconnectCooldownUntil = new Date(Date.now() + windowMs + extraMs);
+    const pauseMs = windowMs + extraMs;
+    const jitterMs = Math.floor(Math.random() * 31000); // 0–30s
+    instance.disconnectCooldownUntil = new Date(Date.now() + pauseMs);
     instance.transitionTo(InstanceState.PAUSED, 'Restart rate limit exceeded');
-    const msg = `Rate limit: ${instance.restartHistory.length} restarts in ${config.restartWindowMinutes}min window. Paused for ${config.restartWindowMinutes}min + ${config.restartRateLimitExtraHours}h.`;
+    const msg = `Rate limit: ${instance.restartHistory.length} restarts in ${config.restartWindowMinutes}min window. Paused for ${config.restartWindowMinutes}min + ${config.restartRateLimitExtraHours}h. Auto-wake in ${Math.round((pauseMs + jitterMs) / 60000)}min.`;
     console.error(`[${instanceId}] ${msg}`);
+
+    instance.clearRateLimitWakeTimer();
+    instance.rateLimitWakeTimer = setTimeout(() => {
+      instance.rateLimitWakeTimer = null;
+      const inst = instances.get(instanceId);
+      if (!inst || inst.state === InstanceState.RESTRICTED) return;
+      console.log(`[${instanceId}] Rate limit wake: attempting ensureReady`);
+      Promise.resolve(ensureReady(instanceId)).catch(err => {
+        console.error(`[${instanceId}] Rate limit wake ensureReady failed:`, err?.message);
+      });
+    }, pauseMs + jitterMs);
+
     throw new Error(`Instance ${instanceId}: ${msg}`);
   }
 
@@ -2192,6 +2287,7 @@ async function deleteInstance(instanceId) {
     instance.clearConnectingWatchdog();
     instance.clearHealthCheck();
     instance.clearDisconnectCooldownTimer();
+    instance.clearRateLimitWakeTimer();
     stopSendLoop(instanceId);
 
     const client = instance.client;
