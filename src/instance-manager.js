@@ -2884,6 +2884,34 @@ function getInstanceDiagnostics(instanceId) {
 }
 
 /**
+ * Get CPU and memory usage for an instance's browser process (if running).
+ * @param {string} instanceId
+ * @returns {Promise<{ cpuPercent: number, memoryMB: number } | null>}
+ */
+async function getInstanceProcessUsage(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance?.client?.pupBrowser) return null;
+  let pid;
+  try {
+    const proc = instance.client.pupBrowser.process();
+    pid = proc?.pid;
+  } catch (_) {
+    return null;
+  }
+  if (!pid) return null;
+  try {
+    const pidusage = require('pidusage');
+    const stat = await pidusage(pid);
+    return {
+      cpuPercent: Math.round((stat.cpu ?? 0) * 10) / 10,
+      memoryMB: Math.round((stat.memory ?? 0) / 1048576),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Create a short-lived view session token for founder-only "View Live Session" (testing/debugging).
  * @param {string} instanceId
  * @param {string} dashboardBaseUrl - e.g. https://dashboard.example.com
@@ -3057,6 +3085,7 @@ module.exports = {
   getQueueDetails,
   triggerSendLoop,
   getInstanceDiagnostics,
+  getInstanceProcessUsage,
   createViewSessionToken,
   validateViewSessionToken,
   captureViewSessionScreenshot,

@@ -7,6 +7,8 @@ const POLL_MS = 1000;
 export interface SystemStatusInstance {
   id: string;
   state: string;
+  cpuPercent?: number;
+  memoryMB?: number;
 }
 
 export interface SystemStatusData {

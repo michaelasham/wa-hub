@@ -1071,25 +1071,33 @@ router.post('/instances/:id/retry', async (req, res) => {
   }
 });
 
-function getSystemStatusPayload() {
+async function getSystemStatusPayload() {
   const sys = systemMode.getSystemMode();
   const now = Date.now();
-  const instances = instanceManager.getAllInstances().map((i) => {
-    const needsQrSince = i.needsQrSince ? new Date(i.needsQrSince).getTime() : 0;
-    const lastQrAt = i.lastQrAt ? new Date(i.lastQrAt).getTime() : 0;
-    return {
-      id: i.id,
-      state: i.state,
-      lastError: i.lastError || null,
-      lastStateChangeAt: i.lastStateChangeAt ? new Date(i.lastStateChangeAt).toISOString() : null,
-      needsQrSince: i.needsQrSince ? new Date(i.needsQrSince).toISOString() : null,
-      lastQrAt: i.lastQrAt ? new Date(i.lastQrAt).toISOString() : null,
-      qrRecoveryAttempts: i.qrRecoveryAttempts ?? 0,
-      restoreAttempts: i.restoreAttempts ?? 0,
-      qrAgeSeconds: lastQrAt > 0 ? Math.round((now - lastQrAt) / 1000) : null,
-      needsQrAgeSeconds: needsQrSince > 0 ? Math.round((now - needsQrSince) / 1000) : null,
-    };
-  });
+  const allInstances = instanceManager.getAllInstances();
+  const instances = await Promise.all(
+    allInstances.map(async (i) => {
+      const needsQrSince = i.needsQrSince ? new Date(i.needsQrSince).getTime() : 0;
+      const lastQrAt = i.lastQrAt ? new Date(i.lastQrAt).getTime() : 0;
+      const usage =
+        typeof instanceManager.getInstanceProcessUsage === 'function'
+          ? await instanceManager.getInstanceProcessUsage(i.id)
+          : null;
+      return {
+        id: i.id,
+        state: i.state,
+        lastError: i.lastError || null,
+        lastStateChangeAt: i.lastStateChangeAt ? new Date(i.lastStateChangeAt).toISOString() : null,
+        needsQrSince: i.needsQrSince ? new Date(i.needsQrSince).toISOString() : null,
+        lastQrAt: i.lastQrAt ? new Date(i.lastQrAt).toISOString() : null,
+        qrRecoveryAttempts: i.qrRecoveryAttempts ?? 0,
+        restoreAttempts: i.restoreAttempts ?? 0,
+        qrAgeSeconds: lastQrAt > 0 ? Math.round((now - lastQrAt) / 1000) : null,
+        needsQrAgeSeconds: needsQrSince > 0 ? Math.round((now - needsQrSince) / 1000) : null,
+        ...(usage && { cpuPercent: usage.cpuPercent, memoryMB: usage.memoryMB }),
+      };
+    })
+  );
   const restoreState = restoreScheduler.getQueueState ? restoreScheduler.getQueueState() : null;
   return {
     mode: sys.mode,
@@ -1116,9 +1124,10 @@ function requireAdminDebug(req, res, next) {
  * GET /__debug/system
  * System mode, queues, restore queue state, per-instance (state, lastError, restoreAttempts, etc.).
  */
-router.get('/__debug/system', requireAdminDebug, (req, res) => {
+router.get('/__debug/system', requireAdminDebug, async (req, res) => {
   try {
-    res.json(createSuccessResponse(getSystemStatusPayload()));
+    const payload = await getSystemStatusPayload();
+    res.json(createSuccessResponse(payload));
   } catch (error) {
     console.error('Error in /__debug/system:', error);
     res.status(500).json(createErrorResponse(error.message, 500));
@@ -1191,13 +1200,14 @@ router.post('/__debug/instances/:id/retry', requireAdminDebug, (req, res) => {
  * GET /system/status
  * Same as __debug/system; optional ADMIN_DEBUG_SECRET header when env set.
  */
-router.get('/system/status', (req, res) => {
+router.get('/system/status', async (req, res) => {
   const secret = process.env.ADMIN_DEBUG_SECRET;
   if (secret && req.headers['x-admin-debug-secret'] !== secret) {
     return res.status(403).json(createErrorResponse('Forbidden', 403));
   }
   try {
-    res.json(createSuccessResponse(getSystemStatusPayload()));
+    const payload = await getSystemStatusPayload();
+    res.json(createSuccessResponse(payload));
   } catch (error) {
     console.error('Error in /system/status:', error);
     res.status(500).json(createErrorResponse(error.message, 500));

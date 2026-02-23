@@ -41,9 +41,9 @@ export default function HomePage() {
   }, [isSyncing]);
 
   const sinceDuration = systemStatus?.since ? formatSinceDuration(systemStatus.since) : '—';
-  const stateByInstanceId = new Map(
-    (systemStatus?.instances ?? systemStatus?.perInstanceStates ?? []).map((i) => [i.id, i.state])
-  );
+  const statusInstances = systemStatus?.instances ?? systemStatus?.perInstanceStates ?? [];
+  const stateByInstanceId = new Map(statusInstances.map((i) => [i.id, i.state]));
+  const detailsByInstanceId = new Map(statusInstances.map((i) => [i.id, i]));
   const queuedByInstanceId = systemStatus?.queuedOutboundByInstance ?? {};
   const syncingInstanceId = systemStatus?.syncingInstanceId ?? null;
 
@@ -122,6 +122,7 @@ export default function HomePage() {
 
   const rows = instances.map((inst) => {
     const backendState = stateByInstanceId.get(inst.id);
+    const details = detailsByInstanceId.get(inst.id);
     const queuedCount = queuedByInstanceId[inst.id] ?? 0;
     const isSyncingRow = inst.id === syncingInstanceId;
     const statusBadge = getStatusBadge(backendState, inst.status, isSyncingRow);
@@ -131,6 +132,16 @@ export default function HomePage() {
       </Tooltip>
     ) : (
       statusBadge
+    );
+    const hasResources = details && (details.cpuPercent != null || details.memoryMB != null);
+    const resourcesCell = hasResources ? (
+      <Text as="span" tone="subdued">
+        {details.cpuPercent != null ? `CPU ${details.cpuPercent}%` : ''}
+        {details.cpuPercent != null && details.memoryMB != null ? ' · ' : ''}
+        {details.memoryMB != null ? `RAM ${details.memoryMB} MB` : ''}
+      </Text>
+    ) : (
+      '—'
     );
     return [
       <Button
@@ -142,6 +153,7 @@ export default function HomePage() {
       </Button>,
       statusCell,
       inst.phoneNumber || '—',
+      resourcesCell,
       queuedCount > 0 ? (
         <Text as="span" tone="subdued">
           {queuedCount} queued
@@ -290,8 +302,8 @@ export default function HomePage() {
             </EmptyState>
           ) : (
             <DataTable
-              columnContentTypes={['text', 'text', 'text', 'text', 'text']}
-              headings={['Instance', 'Status', 'Phone Number', 'Queued', 'Actions']}
+              columnContentTypes={['text', 'text', 'text', 'text', 'text', 'text']}
+              headings={['Instance', 'Status', 'Phone Number', 'CPU · RAM', 'Queued', 'Actions']}
               rows={rows}
             />
           )}
