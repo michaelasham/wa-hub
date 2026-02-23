@@ -1,6 +1,6 @@
 'use client';
 
-import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode, InlineStack, Button } from '@shopify/polaris';
+import { Card, Text, Badge, Spinner, Collapsible, BlockStack, InlineCode, InlineStack, Button, Tooltip } from '@shopify/polaris';
 import { SseEvent } from '@/hooks/useSSE';
 import { useState, useEffect } from 'react';
 
@@ -128,8 +128,19 @@ export function ConnectionPanel({
                 Lifecycle:
               </Text>
               <div style={{ marginTop: '0.5rem' }}>
-                {getLifecycleBadge(rank)}
+                {(status as { lastError?: string } | null)?.lastError ? (
+                  <Tooltip content={(status as { lastError: string }).lastError}>
+                    <span style={{ display: 'inline-block', cursor: 'default' }}>{getLifecycleBadge(rank)}</span>
+                  </Tooltip>
+                ) : (
+                  getLifecycleBadge(rank)
+                )}
               </div>
+              {(status as { lastError?: string } | null)?.lastError && (
+                <Text as="p" variant="bodySm" tone="critical" fontWeight="medium" style={{ marginTop: '0.25rem' }}>
+                  Error: {(status as { lastError: string }).lastError}
+                </Text>
+              )}
               <div style={{ marginTop: '0.25rem' }}>
                 <Text as="p" variant="bodySm" tone="subdued">
                   needs_qr → syncing → active

@@ -45,6 +45,7 @@ export interface WaHubInstance {
   name: string;
   status: string;
   phoneNumber?: string;
+  lastError?: string;
 }
 
 export function useWaHubReachable() {

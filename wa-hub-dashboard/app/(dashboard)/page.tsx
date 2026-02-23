@@ -13,6 +13,7 @@ import {
   EmptyState,
   Spinner,
   Text,
+  Tooltip,
 } from '@shopify/polaris';
 import { useInstances, useWaHubReachable, useHealth } from '@/hooks/useWaHub';
 import { useSystemStatus, formatSinceDuration, instanceStateLabel } from '@/hooks/useSystemStatus';
@@ -124,6 +125,13 @@ export default function HomePage() {
     const queuedCount = queuedByInstanceId[inst.id] ?? 0;
     const isSyncingRow = inst.id === syncingInstanceId;
     const statusBadge = getStatusBadge(backendState, inst.status, isSyncingRow);
+    const statusCell = inst.lastError ? (
+      <Tooltip content={inst.lastError}>
+        <span style={{ display: 'inline-block', cursor: 'default' }}>{statusBadge}</span>
+      </Tooltip>
+    ) : (
+      statusBadge
+    );
     return [
       <Button
         key={`name-${inst.id}`}
@@ -132,7 +140,7 @@ export default function HomePage() {
       >
         {inst.name || inst.id}
       </Button>,
-      statusBadge,
+      statusCell,
       inst.phoneNumber || '—',
       queuedCount > 0 ? (
         <Text as="span" tone="subdued">

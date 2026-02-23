@@ -54,6 +54,7 @@ router.get('/instances', (req, res) => {
       phoneNumber: inst.phoneNumber || undefined,
       webhookUrl: inst.webhookUrl || null,
       webhookEvents: inst.webhookEvents || [],
+      lastError: inst.lastError || undefined,
     }));
 
     res.json(instances);
@@ -287,6 +288,7 @@ router.get('/instances/:id/client/status', async (req, res) => {
         queueDepth: instance.queue.length,
         lastEvent: instance.lastEvent,
         lastDisconnectReason: instance.lastDisconnectReason,
+        lastError: instance.lastError || undefined,
         restartAttempts: instance.restartAttempts,
         // Countdown: when waiting for ready (needs_qr/authenticated/connecting)
         readyWatchdogMs: config.readyWatchdogMs,
