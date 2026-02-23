@@ -4,10 +4,15 @@
  *
  * - wa-hub: backend on PORT 3000
  * - wa-hub-dashboard: Next.js on PORT 3001 (explicit in npm run start)
+ *
+ * IS_LAUNCHPAD is passed from process.env (e.g. from root .env) so the launchpad VM
+ * can run with IS_LAUNCHPAD=true when started via PM2.
  */
 
 const path = require('path');
 
+// Load root .env first so process.env has API_KEY, IS_LAUNCHPAD, etc. when PM2 reads this file
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 // Load dashboard .env so env vars are available for the dashboard app
 require('dotenv').config({ path: path.join(__dirname, 'wa-hub-dashboard', '.env') });
 
@@ -28,6 +33,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 3000,
+        IS_LAUNCHPAD: process.env.IS_LAUNCHPAD || 'false',
       },
       autorestart: true,
       max_restarts: 10,

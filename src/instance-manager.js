@@ -2188,6 +2188,76 @@ async function createInstance(instanceId, name, webhookConfig) {
   return instance;
 }
 
+const LAUNCHPAD_POLL_MS = 5000;
+const LAUNCHPAD_MAX_ATTEMPTS = 2;
+
+/**
+ * Create instance via launchpad VM: start VM, POST /onboard on launchpad, wait for ready
+ * (blocking), then download zip (extract session dir to authBaseDir), merge instances.json,
+ * stop VM, and resume locally with createInstance().
+ * Uses config.useLaunchpadForOnboarding; requires GCP_PROJECT_ID, GCS_BUCKET_NAME, LAUNCHPAD_INTERNAL_SECRET.
+ */
+async function createInstanceViaLaunchpad(instanceId, name, webhookConfig) {
+  const gcpManager = require('./gcp-manager');
+  let baseUrl = config.launchpadInternalUrl;
+  for (let attempt = 1; attempt <= LAUNCHPAD_MAX_ATTEMPTS; attempt++) {
+    try {
+      sentry.addBreadcrumb({ category: 'launchpad', message: 'Starting launchpad VM', level: 'info', data: { attempt } });
+      const { baseUrl: startedUrl } = await gcpManager.startLaunchpad();
+      if (startedUrl) baseUrl = startedUrl;
+      if (!baseUrl) throw new Error('Launchpad base URL not available');
+      const secret = config.launchpadInternalSecret;
+      const headers = { 'Content-Type': 'application/json', 'X-Launchpad-Secret': secret };
+
+      // POST /onboard on launchpad (blocks until ready or timeout)
+      const onboardRes = await axios.post(`${baseUrl}/onboard`, { instanceId, name, webhookConfig }, { headers, timeout: config.launchpadSyncTimeoutMs });
+
+      if (onboardRes.data?.ready) {
+        const gcsSessionPath = onboardRes.data.gcsSessionPath || `sessions/${instanceId}.zip`;
+        const gcsInstancesPath = onboardRes.data.gcsInstancesPath || `instances/onboard-${instanceId}.json`;
+        sentry.addBreadcrumb({ category: 'launchpad', message: 'Downloading session and instances from GCS', level: 'info' });
+
+        // Download zip and extract session dir into authBaseDir (zip root is session-{id}/)
+        await gcpManager.downloadZipFromGCS(gcsSessionPath, config.authBaseDir);
+
+        // Download instances.json from launchpad and merge into local INSTANCES_DATA_PATH
+        const tempInstances = path.join(require('os').tmpdir(), `wa-hub-onboard-${instanceId}-instances.json`);
+        await gcpManager.downloadFileFromGCS(gcsInstancesPath, tempInstances);
+        const launchpadList = JSON.parse(await fs.readFile(tempInstances, 'utf8'));
+        const newEntry = Array.isArray(launchpadList) ? launchpadList.find((e) => e.id === instanceId) : null;
+        if (newEntry) {
+          let currentList = [];
+          try {
+            const data = await fs.readFile(config.instancesDataPath, 'utf8');
+            currentList = JSON.parse(data);
+          } catch (_) {}
+          if (!Array.isArray(currentList)) currentList = [];
+          const filtered = currentList.filter((e) => e.id !== instanceId);
+          filtered.push({ ...newEntry, id: instanceId, name, webhookUrl: webhookConfig.url, webhookEvents: webhookConfig.events || [], typingIndicatorEnabled: newEntry.typingIndicatorEnabled, applyTypingTo: newEntry.applyTypingTo || ['customer'], createdAt: new Date().toISOString() });
+          const dataDir = path.dirname(config.instancesDataPath);
+          await fs.mkdir(dataDir, { recursive: true }).catch(() => {});
+          await fs.writeFile(config.instancesDataPath, JSON.stringify(filtered, null, 2));
+        }
+
+        await gcpManager.stopLaunchpad().catch((err) => console.error('[Launchpad] Stop error:', err.message));
+        sentry.addBreadcrumb({ category: 'launchpad', message: 'Resuming instance locally', level: 'info' });
+        const instance = await createInstance(instanceId, name, webhookConfig);
+        return instance;
+      }
+      throw new Error(onboardRes.data?.error || 'Onboard did not return ready');
+    } catch (err) {
+      sentry.captureException(err, { phase: 'createInstanceViaLaunchpad', attempt, instanceId });
+      if (attempt === LAUNCHPAD_MAX_ATTEMPTS) {
+        await gcpManager.stopLaunchpad().catch(() => {});
+        throw err;
+      }
+      await gcpManager.stopLaunchpad().catch(() => {});
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+  throw new Error('Launchpad onboarding failed after retries');
+}
+
 /**
  * Generate idempotency key for order confirmation poll
  */
@@ -3069,6 +3139,7 @@ async function runOutboundAction(item) {
 module.exports = {
   InstanceState,
   createInstance,
+  createInstanceViaLaunchpad,
   getInstance,
   getAllInstances,
   getInstanceCount,

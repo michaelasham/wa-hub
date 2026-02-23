@@ -140,8 +140,10 @@ router.post('/instances', async (req, res) => {
       ));
     }
 
-    // Create instance
-    const instance = await instanceManager.createInstance(sessionId, name, webhookConfig);
+    // Create instance (optionally via launchpad VM for QR/sync offload)
+    const instance = config.useLaunchpadForOnboarding
+      ? await instanceManager.createInstanceViaLaunchpad(sessionId, name, webhookConfig)
+      : await instanceManager.createInstance(sessionId, name, webhookConfig);
 
     // Return the sanitized sessionId as the instance ID
     // Note: Dots and other invalid chars are replaced with underscores for LocalAuth compatibility
@@ -1210,6 +1212,115 @@ router.get('/system/status', async (req, res) => {
     res.json(createSuccessResponse(payload));
   } catch (error) {
     console.error('Error in /system/status:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+// ----- Launchpad internal API (only when IS_LAUNCHPAD=true) -----
+function launchpadSecretAuth(req, res, next) {
+  const secret = config.launchpadInternalSecret;
+  const headerSecret = req.headers['x-launchpad-secret'] || (req.headers.authorization && req.headers.authorization.replace(/^Bearer\s+/i, ''));
+  if (!secret || headerSecret !== secret) {
+    return res.status(403).json(createErrorResponse('Forbidden', 403));
+  }
+  next();
+}
+
+if (config.isLaunchpad) {
+  /**
+   * POST /onboard — create instance on launchpad, wait for ready, zip session + instances, upload to GCS.
+   * Auth: X-Launchpad-Secret (or Authorization: Bearer <secret>).
+   */
+  router.post('/onboard', launchpadSecretAuth, async (req, res) => {
+    try {
+      const { instanceId, name, webhookConfig } = req.body;
+      if (!instanceId || !name || !webhookConfig?.url) {
+        return res.status(400).json(createErrorResponse('instanceId, name, webhook.url required', 400));
+      }
+      const gcpManager = require('./gcp-manager');
+      const path = require('path');
+      sentry.addBreadcrumb({ category: 'launchpad', message: 'Onboard started', level: 'info', data: { instanceId } });
+      await instanceManager.createInstance(instanceId, name, webhookConfig);
+      const deadline = Date.now() + config.launchpadSyncTimeoutMs;
+      while (Date.now() < deadline) {
+        const inst = instanceManager.getInstance(instanceId);
+        if (inst && inst.state === InstanceState.READY) break;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      const inst = instanceManager.getInstance(instanceId);
+      if (!inst || inst.state !== InstanceState.READY) {
+        return res.status(504).json(createErrorResponse('Sync timeout - instance not ready', 504));
+      }
+      sentry.addBreadcrumb({ category: 'launchpad', message: 'Sync complete on launchpad', level: 'info', data: { instanceId } });
+      const sanitizedId = sanitizeInstanceId(instanceId);
+      const sessionDir = path.join(config.authBaseDir, `session-${sanitizedId}`);
+      const gcsSessionPath = `sessions/${instanceId}.zip`;
+      const gcsInstancesPath = `instances/onboard-${instanceId}.json`;
+      await gcpManager.uploadZipToGCS(sessionDir, gcsSessionPath, `session-${sanitizedId}`);
+      const instancesData = await require('fs').promises.readFile(config.instancesDataPath, 'utf8');
+      await gcpManager.uploadStringToGCS(gcsInstancesPath, instancesData);
+      res.json(createSuccessResponse({ ready: true, gcsSessionPath, gcsInstancesPath }));
+    } catch (error) {
+      console.error('Launchpad onboard error:', error);
+      sentry.captureException(error, { phase: 'launchpad_onboard' });
+      res.status(500).json(createErrorResponse(error.message, 500));
+    }
+  });
+
+  /**
+   * GET /status/:id — instance state (and qrCode when needs_qr) for polling / QR mirroring.
+   * Auth: X-Launchpad-Secret.
+   */
+  router.get('/status/:id', launchpadSecretAuth, (req, res) => {
+    try {
+      const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+      const inst = instanceManager.getInstance(instanceId);
+      const state = inst ? inst.state : null;
+      const payload = { instanceId, state: state || 'unknown' };
+      if (inst && inst.state === InstanceState.NEEDS_QR && inst.qrCode) {
+        payload.qrCode = inst.qrCode;
+      }
+      res.json(createSuccessResponse(payload));
+    } catch (error) {
+      res.status(500).json(createErrorResponse(error.message, 500));
+    }
+  });
+}
+
+// ----- Admin launchpad (warm / stop) -----
+/**
+ * POST /admin/launchpad/warm — start launchpad VM (no auto-stop). Requires API key + optional X-Admin-Debug-Secret.
+ */
+router.post('/admin/launchpad/warm', requireAdminDebug, async (req, res) => {
+  try {
+    if (!config.gcpProjectId || !config.gcsBucketName) {
+      return res.status(400).json(createErrorResponse('Launchpad not configured (GCP_PROJECT_ID, GCS_BUCKET_NAME required)', 400));
+    }
+    const gcpManager = require('./gcp-manager');
+    await gcpManager.startLaunchpad();
+    sentry.addBreadcrumb({ category: 'launchpad', message: 'Launchpad warm requested', level: 'info' });
+    res.json(createSuccessResponse({ status: 'starting', estimatedReadyInSeconds: 120 }));
+  } catch (error) {
+    console.error('Launchpad warm error:', error);
+    sentry.captureException(error, { phase: 'launchpad_warm' });
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * POST /admin/launchpad/stop — stop launchpad VM. Requires API key + optional X-Admin-Debug-Secret.
+ */
+router.post('/admin/launchpad/stop', requireAdminDebug, async (req, res) => {
+  try {
+    if (!config.gcpProjectId) {
+      return res.status(400).json(createErrorResponse('Launchpad not configured (GCP_PROJECT_ID required)', 400));
+    }
+    const gcpManager = require('./gcp-manager');
+    await gcpManager.stopLaunchpad();
+    res.json(createSuccessResponse({ status: 'stopped' }));
+  } catch (error) {
+    console.error('Launchpad stop error:', error);
+    sentry.captureException(error, { phase: 'launchpad_stop' });
     res.status(500).json(createErrorResponse(error.message, 500));
   }
 });

@@ -107,6 +107,11 @@ LOG_LEVEL=info
 | `SENTRY_RELEASE` | Release identifier (e.g. git SHA); optional | - | No |
 | `WA_HUB_INSTANCE_ID` | Stable instance identifier for Sentry (overrides GCP metadata when set) | GCP instance id or `unknown` | No |
 | `WA_HUB_INSTANCE_NAME` | Human-readable instance name for Sentry | - | No |
+| `USE_LAUNCHPAD_FOR_ONBOARDING` | Route new instance creation through launchpad VM (QR/sync offload) | `false` | No |
+| `GCP_PROJECT_ID` | GCP project for launchpad VM and GCS (required if using launchpad) | - | No |
+| `GCS_BUCKET_NAME` | GCS bucket for session/instances transfer (required if using launchpad) | - | No |
+| `LAUNCHPAD_INTERNAL_SECRET` | Shared secret for launchpad internal API (`/onboard`, `/status/:id`) | - | No |
+| `IS_LAUNCHPAD` | Set `true` only on the launchpad VM; enables internal routes | `false` | No |
 
 ### Sentry (error tracking)
 
@@ -157,6 +162,17 @@ Login/sync can spike memory and trigger OOM or Chromium crashes on small VMs. Us
 3. **Small VMs**: Use sequential restore (`RESTORE_CONCURRENCY=1`, default), add swap (`scripts/ops/add-swap.sh 2G`), and set `RESTORE_MIN_FREE_MEM_MB=800` so the scheduler waits for free memory before launching the next instance.
 
 See [scripts/ops/README.md](scripts/ops/README.md) for full ops script usage.
+
+### Launchpad VM (offload QR/sync)
+
+When `USE_LAUNCHPAD_FOR_ONBOARDING=true`, new instance creation is offloaded to a GCP Spot VM (launchpad): the main VM starts the launchpad, triggers onboarding there (QR + sync), then downloads the session and instances from GCS and resumes locally. This avoids QR/sync memory spikes on the main VM.
+
+- **Enable**: Set `USE_LAUNCHPAD_FOR_ONBOARDING=true` and configure `GCP_PROJECT_ID`, `GCS_BUCKET_NAME`, `LAUNCHPAD_INTERNAL_SECRET`, and optionally `LAUNCHPAD_ZONE`, `LAUNCHPAD_VM_NAME`, `LAUNCHPAD_REPO_URL`.
+- **Warm**: `POST /admin/launchpad/warm` (API key + optional `X-Admin-Debug-Secret`) starts the launchpad VM preemptively; no auto-stop.
+- **Stop**: `POST /admin/launchpad/stop` stops the launchpad VM.
+- **Launchpad VM**: Runs wa-hub with `IS_LAUNCHPAD=true`; exposes internal `POST /onboard` and `GET /status/:id` (authenticated with `X-Launchpad-Secret`). Only one onboarding at a time. When using PM2 on the launchpad, set `IS_LAUNCHPAD=true` in `.env` (or export it); `ecosystem.config.js` passes `process.env.IS_LAUNCHPAD` through.
+
+See **[docs/LAUNCHPAD.md](docs/LAUNCHPAD.md)** for architecture, env var table, GCP setup (bucket, service account, roles), warm/stop usage, and troubleshooting (Spot preemption, GCS permissions, startup script failures).
 
 ## Running Locally
 

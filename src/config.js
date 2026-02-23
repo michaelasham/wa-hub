@@ -159,12 +159,36 @@ const config = {
   restoreMinFreeMemMb: parseInt(process.env.RESTORE_MIN_FREE_MEM_MB || '800', 10),
   restoreMaxAttempts: parseInt(process.env.RESTORE_MAX_ATTEMPTS || '5', 10),
   restoreBackoffBaseMs: parseInt(process.env.RESTORE_BACKOFF_BASE_MS || '15000', 10),
+
+  // Launchpad VM (offload QR/sync to Spot VM; GCP Compute + GCS)
+  gcpProjectId: process.env.GCP_PROJECT_ID || '',
+  gcsBucketName: process.env.GCS_BUCKET_NAME || 'wa-hub-launchpad-sessions',
+  launchpadVmName: process.env.LAUNCHPAD_VM_NAME || 'wa-hub-launchpad',
+  launchpadZone: process.env.LAUNCHPAD_ZONE || 'us-central1-c',
+  launchpadInternalUrl: process.env.LAUNCHPAD_INTERNAL_URL || null,
+  launchpadStartTimeoutMs: parseInt(process.env.LAUNCHPAD_START_TIMEOUT_MS || '180000', 10), // 3 min
+  launchpadSyncTimeoutMs: parseInt(process.env.LAUNCHPAD_SYNC_TIMEOUT_MS || '3600000', 10), // 1 hour
+  launchpadUseOnDemand: process.env.LAUNCHPAD_USE_ON_DEMAND === 'true' || process.env.LAUNCHPAD_USE_ON_DEMAND === '1',
+  launchpadInternalSecret: process.env.LAUNCHPAD_INTERNAL_SECRET || '',
+  useLaunchpadForOnboarding: process.env.USE_LAUNCHPAD_FOR_ONBOARDING === 'true' || process.env.USE_LAUNCHPAD_FOR_ONBOARDING === '1',
+  isLaunchpad: process.env.IS_LAUNCHPAD === 'true' || process.env.IS_LAUNCHPAD === '1',
+  launchpadRepoUrl: process.env.LAUNCHPAD_REPO_URL || 'https://github.com/michaelasham/wa-hub.git',
 };
 
 // No default webhook URL - each instance must specify its own webhook URL
 
 if (!config.webhookSecret) {
   console.warn('WARNING: WEBHOOK_SECRET not set. Webhook requests will not include shared secret header.');
+}
+
+// Launchpad: require GCP_PROJECT_ID and LAUNCHPAD_INTERNAL_SECRET when launchpad is used
+if (config.useLaunchpadForOnboarding || config.isLaunchpad) {
+  if (!config.gcpProjectId || !config.gcpProjectId.trim()) {
+    throw new Error('Launchpad is enabled (USE_LAUNCHPAD_FOR_ONBOARDING or IS_LAUNCHPAD) but GCP_PROJECT_ID is missing. Set GCP_PROJECT_ID in .env.');
+  }
+  if (!config.launchpadInternalSecret || !config.launchpadInternalSecret.trim()) {
+    throw new Error('Launchpad is enabled but LAUNCHPAD_INTERNAL_SECRET is missing. Set a strong random string (e.g. node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))") in .env.');
+  }
 }
 
 module.exports = config;
