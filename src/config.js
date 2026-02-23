@@ -32,6 +32,10 @@ const config = {
   
   // Chromium/Chrome executable path (for Puppeteer)
   chromePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser', // Fallback: /usr/bin/chromium
+  // Only add --no-sandbox when explicitly set (e.g. Docker); default false for security
+  chromeDisableSandbox: process.env.CHROME_DISABLE_SANDBOX === '1' || process.env.CHROME_DISABLE_SANDBOX === 'true',
+  chromeArgsExtra: process.env.CHROME_ARGS_EXTRA || '',
+  wahubLogChromeArgs: process.env.WAHUB_LOG_CHROME_ARGS === '1' || process.env.WAHUB_LOG_CHROME_ARGS === 'true',
   
   // Instance lifecycle configuration
   maxQueueSize: parseInt(process.env.MAX_QUEUE_SIZE || '200', 10),
@@ -113,6 +117,29 @@ const config = {
   viewSessionEnabled: true,
   viewSessionTimeoutMin: parseInt(process.env.VIEW_SESSION_TIMEOUT_MIN || '10', 10),
   viewSessionJwtSecret: process.env.VIEW_SESSION_JWT_SECRET || process.env.WEBHOOK_SECRET || process.env.API_KEY || 'view-session-fallback',
+
+  // Low-power mode: outbound queue during SYNCING
+  maxOutboundQueue: parseInt(process.env.MAX_OUTBOUND_QUEUE || '200', 10),
+  outboundQueueTtlMs: parseInt(process.env.OUTBOUND_QUEUE_TTL_MS || '300000', 10), // 5 min
+  outboundDrainDelayMs: parseInt(process.env.OUTBOUND_DRAIN_DELAY_MS || '350', 10), // between actions
+
+  // Low-power mode: inbound buffer during SYNCING
+  inboundFlushBatch: parseInt(process.env.INBOUND_FLUSH_BATCH || '50', 10),
+  inboundFlushIntervalMs: parseInt(process.env.INBOUND_FLUSH_INTERVAL_MS || '500', 10),
+  inboundMaxBuffer: parseInt(process.env.INBOUND_MAX_BUFFER || '2000', 10),
+
+  // Sync-lite: block heavy resources for syncing instance (requires page hook; reserved for future use)
+  syncLiteBlockImages: process.env.SYNC_LITE_BLOCK_IMAGES === '1',
+  syncLiteBlockMedia: process.env.SYNC_LITE_BLOCK_MEDIA === '1',
+  syncLiteBlockFonts: process.env.SYNC_LITE_BLOCK_FONTS === '1',
+
+  // NEEDS_QR timeout & recovery: prevent global SYNCING from being held by stuck QR
+  qrSyncGraceMs: parseInt(process.env.QR_SYNC_GRACE_MS || '30000', 10),       // NEEDS_QR keeps SYNCING only this long
+  qrStaleMs: parseInt(process.env.QR_STALE_MS || '90000', 10),                // no QR event for this long = stale
+  qrTtlMs: parseInt(process.env.QR_TTL_MS || '300000', 10),                  // NEEDS_QR longer than this = timeout
+  qrMaxRecoveryAttempts: parseInt(process.env.QR_MAX_RECOVERY_ATTEMPTS || '3', 10),
+  qrRecoveryWatchdogIntervalMs: parseInt(process.env.QR_RECOVERY_WATCHDOG_INTERVAL_MS || '10000', 10), // 10s
+  qrRecoveryBackoffMs: (process.env.QR_RECOVERY_BACKOFF_MS || '10000,30000,60000').split(',').map(s => parseInt(s.trim(), 10)),
 };
 
 // No default webhook URL - each instance must specify its own webhook URL

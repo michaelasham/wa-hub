@@ -103,7 +103,10 @@ async function createSession(sessionId, name, webhookConfig = {}) {
   // Save to disk (async, don't wait)
   saveInstancesToDisk().catch(err => console.error('[Persistence] Failed to save after create:', err.message));
 
-  // Create WhatsApp client using system Chromium
+  // Create WhatsApp client using centralized Chromium launch options (same as instance-manager)
+  const { getChromiumLaunchArgs } = require('./browser/launchOptions');
+  const puppeteerArgs = getChromiumLaunchArgs();
+  puppeteerArgs.push('--remote-debugging-port=0');
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: sessionId,
@@ -111,11 +114,7 @@ async function createSession(sessionId, name, webhookConfig = {}) {
     puppeteer: {
       headless: true,
       executablePath: config.chromePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-      ],
+      args: puppeteerArgs,
     },
   });
 

@@ -1,17 +1,44 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useEffect, useState, useCallback, useRef, Suspense } from 'react';
-import { Page, Banner, BlockStack } from '@shopify/polaris';
+import { Page, Banner, BlockStack, Button } from '@shopify/polaris';
 
 const POLL_INTERVAL_MS = 1500;
 
 function ViewerContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const token = searchParams.get('token');
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [closing, setClosing] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+
+  const handleClose = useCallback(async () => {
+    if (!token || closing) return;
+    setClosing(true);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    try {
+      await fetch('/api/view-session/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+        credentials: 'include',
+      });
+    } catch {
+      /* ignore */
+    }
+    if (typeof window !== 'undefined' && window.opener) {
+      window.close();
+    } else {
+      router.push('/');
+    }
+  }, [token, closing, router]);
 
   const fetchScreenshot = useCallback(async () => {
     if (!token) return;
@@ -41,9 +68,10 @@ function ViewerContent() {
       return;
     }
     fetchScreenshot();
-    const interval = setInterval(fetchScreenshot, POLL_INTERVAL_MS);
+    intervalRef.current = setInterval(fetchScreenshot, POLL_INTERVAL_MS);
     return () => {
-      clearInterval(interval);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = null;
       if (imageUrlRef.current) URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = null;
     };
@@ -58,12 +86,19 @@ function ViewerContent() {
   }
 
   return (
-    <Page title="View Live Session (Testing Only)">
+    <Page
+      title="View Live Session (Testing Only)"
+      primaryAction={{
+        content: 'Close',
+        onAction: handleClose,
+        loading: closing,
+      }}
+    >
       <BlockStack gap="400">
         <Banner tone="warning">
           <p>
-            <strong>Testing/debugging only.</strong> This session view is ephemeral and will expire. Do not use for
-            production monitoring.
+            <strong>Testing/debugging only.</strong> Screenshots stream from the existing headless instance (no extra
+            browser). Click Close to stop polling and revoke the session.
           </p>
         </Banner>
         {error && (

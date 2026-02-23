@@ -9,15 +9,16 @@ import {
   Banner,
   Frame,
   TopBar,
-  Navigation,
   Badge,
   EmptyState,
   Spinner,
   Text,
 } from '@shopify/polaris';
 import { useInstances, useWaHubReachable, useHealth } from '@/hooks/useWaHub';
+import { useSystemStatus, formatSinceDuration, instanceStateLabel } from '@/hooks/useSystemStatus';
 import { CreateInstanceButton } from '@/components/CreateInstanceButton';
-import { useState, useCallback } from 'react';
+import { SystemStatusPill } from '@/components/SystemStatusPill';
+import { useState, useCallback, useEffect } from 'react';
 import { waHubRequest } from '@/lib/wahubClient';
 
 export default function HomePage() {
@@ -25,9 +26,25 @@ export default function HomePage() {
   const reachable = useWaHubReachable();
   const { health } = useHealth();
   const { instances, loading, error, refresh } = useInstances();
+  const { data: systemStatus, error: systemStatusError } = useSystemStatus();
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [fixingWebhooks, setFixingWebhooks] = useState(false);
   const [fixWebhooksResult, setFixWebhooksResult] = useState<string | null>(null);
+  const [durationTick, setDurationTick] = useState(0);
+
+  const isSyncing = systemStatus?.mode === 'syncing';
+  useEffect(() => {
+    if (!isSyncing) return;
+    const id = setInterval(() => setDurationTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [isSyncing]);
+
+  const sinceDuration = systemStatus?.since ? formatSinceDuration(systemStatus.since) : '—';
+  const stateByInstanceId = new Map(
+    (systemStatus?.instances ?? systemStatus?.perInstanceStates ?? []).map((i) => [i.id, i.state])
+  );
+  const queuedByInstanceId = systemStatus?.queuedOutboundByInstance ?? {};
+  const syncingInstanceId = systemStatus?.syncingInstanceId ?? null;
 
   const handleFixWebhookUrls = useCallback(async () => {
     setFixingWebhooks(true);
@@ -73,8 +90,22 @@ export default function HomePage() {
     },
   ];
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
+  const getStatusBadge = (backendState: string | undefined, instStatus: string, isSyncingRow: boolean) => {
+    const state = backendState ?? instStatus?.toLowerCase?.() ?? '';
+    if (isSyncingRow) return <Badge tone="attention">SYNCING</Badge>;
+    switch (backendState ?? state) {
+      case 'READY':
+        return <Badge tone="success">READY</Badge>;
+      case 'CONNECTING':
+        return <Badge tone="attention">SYNCING</Badge>;
+      case 'NEEDS_QR':
+        return <Badge tone="warning">WAITING_FOR_QR</Badge>;
+      case 'DISCONNECTED':
+      case 'PAUSED':
+        return <Badge tone="critical">DISCONNECTED</Badge>;
+      case 'ERROR':
+      case 'RESTRICTED':
+        return <Badge tone="critical">FAILED</Badge>;
       case 'ready':
         return <Badge tone="success">Ready</Badge>;
       case 'qr':
@@ -84,12 +115,15 @@ export default function HomePage() {
       case 'disconnected':
         return <Badge tone="critical">Disconnected</Badge>;
       default:
-        return <Badge>{status}</Badge>;
+        return <Badge>{instanceStateLabel(backendState ?? state) || instStatus || state}</Badge>;
     }
   };
 
   const rows = instances.map((inst) => {
-    const statusBadge = getStatusBadge(inst.status);
+    const backendState = stateByInstanceId.get(inst.id);
+    const queuedCount = queuedByInstanceId[inst.id] ?? 0;
+    const isSyncingRow = inst.id === syncingInstanceId;
+    const statusBadge = getStatusBadge(backendState, inst.status, isSyncingRow);
     return [
       <Button
         key={`name-${inst.id}`}
@@ -100,6 +134,13 @@ export default function HomePage() {
       </Button>,
       statusBadge,
       inst.phoneNumber || '—',
+      queuedCount > 0 ? (
+        <Text as="span" tone="subdued">
+          {queuedCount} queued
+        </Text>
+      ) : (
+        '—'
+      ),
       <Button
         key={`action-${inst.id}`}
         url={`/instances/${encodeURIComponent(inst.id)}`}
@@ -114,13 +155,16 @@ export default function HomePage() {
     <TopBar
       showNavigationToggle={false}
       userMenu={
-        <TopBar.UserMenu
-          actions={userMenuActions}
-          name="Admin"
-          initials="A"
-          open={userMenuActive}
-          onToggle={toggleUserMenu}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <SystemStatusPill data={systemStatus} error={systemStatusError} />
+          <TopBar.UserMenu
+            actions={userMenuActions}
+            name="Admin"
+            initials="A"
+            open={userMenuActive}
+            onToggle={toggleUserMenu}
+          />
+        </div>
       }
     />
   );
@@ -143,6 +187,23 @@ export default function HomePage() {
           },
         ]}
       >
+        {systemStatusError && !systemStatus && (
+          <Banner tone="warning" title="System status unavailable">
+            <p>Low Power Mode status could not be loaded. The rest of the dashboard works as usual.</p>
+          </Banner>
+        )}
+
+        {isSyncing && systemStatus && (
+          <Banner tone="warning" title="Low Power Mode is ON">
+            <p>
+              Outbound actions are queued while <strong>{syncingInstanceId ?? 'an instance'}</strong> syncs.
+              {' '}Since: <strong>{sinceDuration}</strong>
+              {' '}· Outbound queued: <strong>{systemStatus.queuedOutboundCount}</strong>
+              {' '}| Inbound buffered: <strong>{systemStatus.inboundBufferCount}</strong>
+            </p>
+          </Banner>
+        )}
+
         {reachable === false && (
           <Banner tone="critical" title="Connection Error">
             <p>wa-hub service is unreachable. Check WA_HUB_BASE_URL and ensure wa-hub is running.</p>
@@ -207,8 +268,8 @@ export default function HomePage() {
             </EmptyState>
           ) : (
             <DataTable
-              columnContentTypes={['text', 'text', 'text', 'text']}
-              headings={['Instance', 'Status', 'Phone Number', 'Actions']}
+              columnContentTypes={['text', 'text', 'text', 'text', 'text']}
+              headings={['Instance', 'Status', 'Phone Number', 'Queued', 'Actions']}
               rows={rows}
             />
           )}

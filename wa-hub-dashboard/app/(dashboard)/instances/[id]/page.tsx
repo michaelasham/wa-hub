@@ -18,6 +18,8 @@ import { QrPanel } from '@/components/QrPanel';
 import { ActionsPanel } from '@/components/ActionsPanel';
 import { WebhooksPanel } from '@/components/WebhooksPanel';
 import { LogsPanel } from '@/components/LogsPanel';
+import { SystemStatusPill } from '@/components/SystemStatusPill';
+import { useSystemStatus, formatSinceDuration } from '@/hooks/useSystemStatus';
 
 export default function InstanceDetailPage() {
   const params = useParams();
@@ -29,6 +31,7 @@ export default function InstanceDetailPage() {
   const [loading, setLoading] = useState(true);
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [navigationActive, setNavigationActive] = useState(false);
+  const { data: systemStatus, error: systemStatusError } = useSystemStatus();
 
   const fetchStatus = useCallback(async () => {
     const res = await waHubRequest<{ clientStatus?: unknown }>({
@@ -122,13 +125,16 @@ export default function InstanceDetailPage() {
     <TopBar
       showNavigationToggle
       userMenu={
-        <TopBar.UserMenu
-          actions={userMenuActions}
-          name="Admin"
-          initials="A"
-          open={userMenuActive}
-          onToggle={toggleUserMenu}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <SystemStatusPill data={systemStatus} error={systemStatusError} />
+          <TopBar.UserMenu
+            actions={userMenuActions}
+            name="Admin"
+            initials="A"
+            open={userMenuActive}
+            onToggle={toggleUserMenu}
+          />
+        </div>
       }
       onNavigationToggle={toggleNavigation}
     />
@@ -166,6 +172,17 @@ export default function InstanceDetailPage() {
         {!connected && (
           <Banner tone="warning" title="SSE Connection">
             <p>Server-Sent Events connection is not active. Real-time updates may not work.</p>
+          </Banner>
+        )}
+
+        {systemStatus?.mode === 'syncing' && (
+          <Banner tone="warning" title="Low Power Mode is ON">
+            <p>
+              Outbound actions are queued while <strong>{systemStatus.syncingInstanceId ?? 'an instance'}</strong> syncs.
+              {' '}Since: <strong>{formatSinceDuration(systemStatus.since)}</strong>
+              {' '}· Outbound queued: <strong>{systemStatus.queuedOutboundCount}</strong>
+              {' '}| Inbound buffered: <strong>{systemStatus.inboundBufferCount}</strong>
+            </p>
           </Banner>
         )}
 
