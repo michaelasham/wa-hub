@@ -128,10 +128,11 @@ const config = {
   inboundFlushIntervalMs: parseInt(process.env.INBOUND_FLUSH_INTERVAL_MS || '500', 10),
   inboundMaxBuffer: parseInt(process.env.INBOUND_MAX_BUFFER || '2000', 10),
 
-  // Sync-lite: block heavy resources for syncing instance (requires page hook; reserved for future use)
+  // Sync-lite: block heavy resources for syncing instance
   syncLiteBlockImages: process.env.SYNC_LITE_BLOCK_IMAGES === '1',
   syncLiteBlockMedia: process.env.SYNC_LITE_BLOCK_MEDIA === '1',
   syncLiteBlockFonts: process.env.SYNC_LITE_BLOCK_FONTS === '1',
+  syncLiteBlockStyles: process.env.SYNC_LITE_BLOCK_STYLES === '1',
 
   // NEEDS_QR timeout & recovery: prevent global SYNCING from being held by stuck QR
   qrSyncGraceMs: parseInt(process.env.QR_SYNC_GRACE_MS || '30000', 10),       // NEEDS_QR keeps SYNCING only this long
@@ -140,6 +141,19 @@ const config = {
   qrMaxRecoveryAttempts: parseInt(process.env.QR_MAX_RECOVERY_ATTEMPTS || '3', 10),
   qrRecoveryWatchdogIntervalMs: parseInt(process.env.QR_RECOVERY_WATCHDOG_INTERVAL_MS || '10000', 10), // 10s
   qrRecoveryBackoffMs: (process.env.QR_RECOVERY_BACKOFF_MS || '10000,30000,60000').split(',').map(s => parseInt(s.trim(), 10)),
+
+  // Puppeteer/Chromium launch diagnostics and executable
+  puppeteerExecutablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '',
+  puppeteerDumpio: process.env.PUPPETEER_DUMPIO === '1',
+  puppeteerDebugLaunch: process.env.PUPPETEER_DEBUG_LAUNCH === '1',
+  chromeLaunchTimeoutMs: parseInt(process.env.CHROME_LAUNCH_TIMEOUT_MS || '60000', 10),
+
+  // Sequential restore (prevent stampede)
+  restoreConcurrency: parseInt(process.env.RESTORE_CONCURRENCY || '1', 10),
+  restoreCooldownMs: parseInt(process.env.RESTORE_COOLDOWN_MS || '30000', 10),
+  restoreMinFreeMemMb: parseInt(process.env.RESTORE_MIN_FREE_MEM_MB || '800', 10),
+  restoreMaxAttempts: parseInt(process.env.RESTORE_MAX_ATTEMPTS || '5', 10),
+  restoreBackoffBaseMs: parseInt(process.env.RESTORE_BACKOFF_BASE_MS || '15000', 10),
 };
 
 // No default webhook URL - each instance must specify its own webhook URL

@@ -11,6 +11,10 @@ const sentry = require('./observability/sentry');
 const systemMode = require('./systemMode');
 const outboundQueue = require('./queues/outboundQueue');
 const inboundBuffer = require('./queues/inboundBuffer');
+const restoreScheduler = require('./restoreScheduler');
+const launchOptions = require('./browser/launchOptions');
+const os = require('os');
+const shm = require('./system/shm');
 const { 
   formatPhoneForWhatsApp, 
   extractPhoneNumber,
@@ -29,6 +33,7 @@ const router = express.Router();
 function mapInstanceStateToStatus(state) {
   const stateMap = {
     [InstanceState.READY]: 'ready',
+    [InstanceState.STARTING_BROWSER]: 'initializing',
     [InstanceState.CONNECTING]: 'initializing',
     [InstanceState.DISCONNECTED]: 'disconnected',
     [InstanceState.NEEDS_QR]: 'qr',
@@ -1075,14 +1080,17 @@ function getSystemStatusPayload() {
     return {
       id: i.id,
       state: i.state,
+      lastError: i.lastError || null,
+      lastStateChangeAt: i.lastStateChangeAt ? new Date(i.lastStateChangeAt).toISOString() : null,
       needsQrSince: i.needsQrSince ? new Date(i.needsQrSince).toISOString() : null,
       lastQrAt: i.lastQrAt ? new Date(i.lastQrAt).toISOString() : null,
       qrRecoveryAttempts: i.qrRecoveryAttempts ?? 0,
-      lastStateChangeAt: i.lastStateChangeAt ? new Date(i.lastStateChangeAt).toISOString() : null,
+      restoreAttempts: i.restoreAttempts ?? 0,
       qrAgeSeconds: lastQrAt > 0 ? Math.round((now - lastQrAt) / 1000) : null,
       needsQrAgeSeconds: needsQrSince > 0 ? Math.round((now - needsQrSince) / 1000) : null,
     };
   });
+  const restoreState = restoreScheduler.getQueueState ? restoreScheduler.getQueueState() : null;
   return {
     mode: sys.mode,
     since: sys.since?.toISOString?.() ?? sys.since,
@@ -1090,20 +1098,91 @@ function getSystemStatusPayload() {
     queuedOutboundCount: outboundQueue.getCount(),
     queuedOutboundByInstance: outboundQueue.getCountByInstance?.() ?? {},
     inboundBufferCount: inboundBuffer.getCount(),
+    restoreQueue: restoreState,
     instances,
     perInstanceStates: instances,
   };
 }
 
+function requireAdminDebug(req, res, next) {
+  const secret = process.env.ADMIN_DEBUG_SECRET;
+  if (secret && req.headers['x-admin-debug-secret'] !== secret) {
+    return res.status(403).json(createErrorResponse('Forbidden', 403));
+  }
+  next();
+}
+
 /**
  * GET /__debug/system
- * Low-power mode visibility: system mode, queue depths, per-instance states.
+ * System mode, queues, restore queue state, per-instance (state, lastError, restoreAttempts, etc.).
  */
-router.get('/__debug/system', (req, res) => {
+router.get('/__debug/system', requireAdminDebug, (req, res) => {
   try {
     res.json(createSuccessResponse(getSystemStatusPayload()));
   } catch (error) {
     console.error('Error in /__debug/system:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * GET /__debug/env
+ * Safe subset: node version, chosen executable path, exists, free/total mem, shm, disk free /tmp, uid/gid.
+ * Protected by ADMIN_DEBUG_SECRET when set.
+ */
+router.get('/__debug/env', requireAdminDebug, (req, res) => {
+  try {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const shmBytes = shm.getShmSizeBytes ? shm.getShmSizeBytes() : null;
+    const executable = launchOptions.getChosenExecutablePath ? launchOptions.getChosenExecutablePath() : { path: null, exists: false };
+    let diskFreeTmp = null;
+    let ulimitNofile = null;
+    try {
+      const { execSync } = require('child_process');
+      diskFreeTmp = execSync('df -k /tmp 2>/dev/null | tail -1', { encoding: 'utf8', timeout: 2000 }).trim();
+    } catch (_) {}
+    try {
+      ulimitNofile = process.geteuid ? require('child_process').execSync('ulimit -n 2>/dev/null', { encoding: 'utf8' }).trim() : null;
+    } catch (_) {}
+    res.json(createSuccessResponse({
+      nodeVersion: process.version,
+      executablePath: executable.path || null,
+      executablePathExists: executable.path ? executable.exists : null,
+      totalMemMB: Math.round(totalMem / 1048576),
+      freeMemMB: Math.round(freeMem / 1048576),
+      shmSizeMB: shmBytes != null ? Math.round(shmBytes / 1048576) : null,
+      diskFreeTmp,
+      uid: typeof process.getuid === 'function' ? process.getuid() : null,
+      gid: typeof process.getgid === 'function' ? process.getgid() : null,
+      ulimitNofile,
+    }));
+  } catch (error) {
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * POST /__debug/instances/:id/retry
+ * Enqueue retry for ERROR/FAILED_QR_TIMEOUT instance; uses sequential scheduler (202 if queued).
+ */
+router.post('/__debug/instances/:id/retry', requireAdminDebug, (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+    const instance = instanceManager.getInstance(instanceId);
+    if (!instance) {
+      return res.status(404).json(createErrorResponse(`Instance ${instanceId} not found`, 404));
+    }
+    if (instance.state !== InstanceState.ERROR && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
+      return res.status(400).json(createErrorResponse(`Instance not in ERROR/FAILED_QR_TIMEOUT (state: ${instance.state})`, 400));
+    }
+    restoreScheduler.enqueueRetry(instanceId);
+    res.status(202).json(createSuccessResponse({ queued: true, instanceId, message: 'Retry queued; scheduler will process when ready.' }));
+  } catch (error) {
+    console.error('Error enqueueing retry:', error);
     res.status(500).json(createErrorResponse(error.message, 500));
   }
 });

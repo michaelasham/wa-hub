@@ -86,6 +86,13 @@ LOG_LEVEL=info
 | `CHROME_DISABLE_SANDBOX` | Set to `1` to add `--no-sandbox` (e.g. some Docker setups); default off for security | `0` | No |
 | `CHROME_ARGS_EXTRA` | Extra Chromium flags (space-separated) | - | No |
 | `WAHUB_LOG_CHROME_ARGS` | Set to `1` to log full Chromium launch context (memory, versions) on each instance start | `0` | No |
+| `PUPPETEER_DUMPIO` | Set to `1` to pipe Chromium stderr to process (see PM2 logs on launch failure) | `0` | No |
+| `PUPPETEER_DEBUG_LAUNCH` | Set to `1` to log executable, memory, shm, /tmp on each launch | `0` | No |
+| `CHROME_LAUNCH_TIMEOUT_MS` | Puppeteer launch timeout (ms) | `60000` | No |
+| `RESTORE_CONCURRENCY` | Max concurrent restores on startup (use `1` on small VMs) | `1` | No |
+| `RESTORE_COOLDOWN_MS` | Delay (ms) between each restore attempt | `30000` | No |
+| `RESTORE_MIN_FREE_MEM_MB` | Do not start next restore if free memory below this (MB) | `800` | No |
+| `RESTORE_MAX_ATTEMPTS` | Max restore attempts per instance before marking ERROR | `5` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
 | `TYPING_INDICATOR_ENABLED_DEFAULT` | Enable typing indicator by default for new instances | `true` | No |
@@ -139,6 +146,14 @@ Login/sync can spike memory and trigger OOM or Chromium crashes on small VMs. Us
   sudo ./scripts/ops/add-swap.sh 4G
   ```
 - **Verify after a crash**: Run `./scripts/ops/check-oom.sh` to see OOM/killed process messages and current memory/swap; run `./scripts/ops/check-shm.sh` to see `/dev/shm` size and recommendations.
+
+**How to diagnose "Failed to launch the browser process":**
+
+1. **Get actionable errors**: On launch failure, wa-hub attaches a Chromium log tail to `instance.lastError` (visible in the dashboard tooltip and in `GET /instances` or `GET /__debug/system`). Enable extra diagnostics:
+   - `PUPPETEER_DUMPIO=1` – Chromium stderr is piped to the process (so it appears in PM2 logs).
+   - `PUPPETEER_DEBUG_LAUNCH=1` – Log executable path, headless, args count, uid/gid, total/free memory, `/dev/shm` size, disk free for `/tmp` on each launch.
+2. **Reproduce**: Restart the instance (or the service), then check `lastError` on the failed instance (dashboard or API). The tail includes the last ~3.5k characters of the Chromium log when `CHROME_LOG_DIR` is writable (default `/tmp`).
+3. **Small VMs**: Use sequential restore (`RESTORE_CONCURRENCY=1`, default), add swap (`scripts/ops/add-swap.sh 2G`), and set `RESTORE_MIN_FREE_MEM_MB=800` so the scheduler waits for free memory before launching the next instance.
 
 See [scripts/ops/README.md](scripts/ops/README.md) for full ops script usage.
 

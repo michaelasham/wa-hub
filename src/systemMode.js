@@ -51,7 +51,7 @@ function recomputeFromInstances(getInstancesFn) {
   const graceMs = config.qrSyncGraceMs || 30000;
 
   const syncing = instances.find((i) => {
-    if (i.state === 'connecting') return true;
+    if (i.state === 'starting_browser' || i.state === 'connecting') return true;
     if (i.state === 'needs_qr') {
       const since = i.needsQrSince ? new Date(i.needsQrSince).getTime() : 0;
       return since > 0 && (now - since) <= graceMs;

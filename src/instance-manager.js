@@ -39,6 +39,7 @@ function debugLog(instanceId, event, data = {}) {
 // State machine enum
 const InstanceState = {
   READY: 'ready',
+  STARTING_BROWSER: 'starting_browser', // Launching Chromium (before CONNECTING)
   CONNECTING: 'connecting',
   DISCONNECTED: 'disconnected',
   NEEDS_QR: 'needs_qr',
@@ -154,6 +155,10 @@ class InstanceContext {
     this.lastErrorAt = null;
     this.lastErrorStack = null;
 
+    // Restore scheduler: attempts and backoff (for sequential restore)
+    this.restoreAttempts = 0;
+    this.lastRestoreAttemptAt = null;
+
     // CONNECTING watchdog: restart if stuck > N minutes
     this.connectingWatchdogTimer = null;
     this.connectingWatchdogStartAt = null;
@@ -216,7 +221,7 @@ class InstanceContext {
       this.qrRecoveryAttempts = 0;
       this.nextQrRecoveryAt = null;
     }
-    if (newState === InstanceState.CONNECTING || newState === InstanceState.NEEDS_QR) {
+    if (newState === InstanceState.STARTING_BROWSER || newState === InstanceState.CONNECTING || newState === InstanceState.NEEDS_QR) {
       systemMode.enterSyncing(this.id);
     }
     systemMode.recomputeFromInstances(() => Array.from(instances.values()));
@@ -772,6 +777,7 @@ async function recoverNeedsQrInstance(instanceId) {
       await client.initialize().catch((err) => {
         console.error(`[${instanceId}] QR recovery hard initialize error:`, err.message);
       });
+      require('./utils/syncLiteInterception').enableSyncLiteInterception(client, instanceId);
     } else {
       // Nuclear: logout (best-effort), destroy, purge auth, recreate + initialize
       instance.clearReadyWatchdog();
@@ -798,6 +804,7 @@ async function recoverNeedsQrInstance(instanceId) {
       await client.initialize().catch((err) => {
         console.error(`[${instanceId}] QR recovery nuclear initialize error:`, err.message);
       });
+      require('./utils/syncLiteInterception').enableSyncLiteInterception(client, instanceId);
     }
   } catch (err) {
     console.error(`[${instanceId}] QR recovery attempt ${attempt} failed:`, err.message);
@@ -1114,51 +1121,34 @@ async function copyDirectory(src, dest) {
  */
 async function createClient(instanceId, instanceName) {
   const sanitizedClientId = sanitizeInstanceId(instanceId);
-  const { getChromiumLaunchArgs, logLaunchContext } = require('./browser/launchOptions');
+  const { getPuppeteerLaunchOptions, getChosenExecutablePath, logLaunchContext } = require('./browser/launchOptions');
 
-  // Centralized Chromium args (memory/shm hardening, configurable via env)
-  const puppeteerArgs = getChromiumLaunchArgs();
-  puppeteerArgs.push('--remote-debugging-port=0'); // View Live Session (random free port)
+  const puppeteerOpts = getPuppeteerLaunchOptions(instanceId);
+  const puppeteerArgs = [...(puppeteerOpts.args || []), '--remote-debugging-port=0'];
 
   const puppeteerConfig = {
-    headless: true,
+    headless: puppeteerOpts.headless !== false,
     args: puppeteerArgs,
+    timeout: puppeteerOpts.timeout,
+    dumpio: puppeteerOpts.dumpio || false,
   };
-  
-  // Use system Chromium when CHROME_PATH is set and exists (avoids Puppeteer bundled Chromium)
-  // Bundled Chromium can cause 99% CPU renderer hangs on WhatsApp Web load
-  const pathsToTry = config.chromePath
-    ? [config.chromePath]
-    : [
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/snap/bin/chromium',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-      ];
-  let foundPath = null;
-  for (const testPath of pathsToTry) {
-    try {
-      await fs.access(testPath);
-      foundPath = testPath;
-      break;
-    } catch (error) {
-      continue;
-    }
-  }
-  if (foundPath) {
-    puppeteerConfig.executablePath = foundPath;
-    console.log(`[${instanceId}] Using Chrome: ${foundPath}`);
+
+  const { path: chosenPath, exists: chosenExists } = getChosenExecutablePath();
+  if (chosenPath) {
+    puppeteerConfig.executablePath = chosenPath;
+    console.log(`[${instanceId}] [Chromium] chosen executable=${chosenPath} exists=${chosenExists}`);
   } else {
-    console.log(`[${instanceId}] No system Chrome found, using Puppeteer bundled Chromium`);
+    console.log(`[${instanceId}] [Chromium] no system executable found, using Puppeteer bundled`);
   }
 
   logLaunchContext(instanceId, {
     executablePath: puppeteerConfig.executablePath || 'bundled',
-    headless: true,
+    executablePathExists: chosenPath ? chosenExists : undefined,
+    headless: puppeteerConfig.headless,
     argsCount: puppeteerArgs.length,
+    args: puppeteerArgs,
   });
-  
+
   return new Client({
     authStrategy: new LocalAuth({
       clientId: sanitizedClientId,
@@ -2117,27 +2107,26 @@ async function createInstance(instanceId, name, webhookConfig) {
     let client = null;
     
     try {
-      // Create client
+      // Create client (builds Client; launch happens in initialize())
       client = await createClient(instanceId, name);
       instance.client = client;
-      
-      // Setup event listeners
+
       setupEventListeners(instanceId, client);
-      
-      // Auto-dismiss "A fresh look for WhatsApp Web" popup (runs in parallel with initialize)
       startPopupDismisser(client, `[${instanceId}]`);
-      
-      // Small delay to let browser process stabilize
+
       if (attempt > 1) {
         await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
       }
-      
-      // Initialize
-      instance.transitionTo(InstanceState.CONNECTING, `initializing (attempt ${attempt}/${maxAttempts})`);
+
+      instance.transitionTo(InstanceState.STARTING_BROWSER, `launching browser (attempt ${attempt}/${maxAttempts})`);
       console.log(`[${instanceId}] Initializing client (attempt ${attempt}/${maxAttempts})...`);
-      
+
       await client.initialize();
-      
+
+      instance.transitionTo(InstanceState.CONNECTING, `initializing (attempt ${attempt}/${maxAttempts})`);
+      const { enableSyncLiteInterception } = require('./utils/syncLiteInterception');
+      enableSyncLiteInterception(client, instanceId);
+
       // Wait for ready or QR (with timeout)
       // On slow VMs, authenticated can take 20-30s; ready can take another 30-60s
       const readyTimeout = config.initTimeoutMs;
@@ -2163,27 +2152,26 @@ async function createInstance(instanceId, name, webhookConfig) {
       
     } catch (error) {
       lastError = error;
+      const { buildLaunchFailureMessage, logLaunchFailure } = require('./browser/launchOptions');
+      const launchErrorMsg = buildLaunchFailureMessage(error, instanceId);
+      instance.lastError = launchErrorMsg;
+      instance.lastErrorAt = new Date();
+      instance.lastErrorStack = error.stack;
+      logLaunchFailure(instanceId, error, launchErrorMsg);
       console.error(`[${instanceId}] Initialization attempt ${attempt}/${maxAttempts} failed:`, error.message);
-      
-      // Clean up failed client
+
       if (client) {
         try {
-          // Remove event listeners to prevent leaks
-          if (client.pupPage) {
-            client.pupPage.removeAllListeners();
-          }
-          if (client.pupBrowser) {
-            await client.pupBrowser.close().catch(() => {});
-          }
+          if (client.pupPage) client.pupPage.removeAllListeners();
+          if (client.pupBrowser) await client.pupBrowser.close().catch(() => {});
         } catch (cleanupError) {
           console.warn(`[${instanceId}] Error during cleanup:`, cleanupError.message);
         }
         instance.client = null;
       }
-      
-      // If this was the last attempt, throw the error
+
       if (attempt === maxAttempts) {
-        instance.transitionTo(InstanceState.ERROR, `Initialization failed after ${maxAttempts} attempts: ${error.message}`);
+        instance.transitionTo(InstanceState.ERROR, launchErrorMsg);
         throw new Error(`Failed to initialize after ${maxAttempts} attempts: ${error.message}`);
       }
       
@@ -2622,34 +2610,75 @@ async function saveInstancesToDisk() {
 }
 
 /**
- * Load instances from disk and restore
+ * Create a stub instance in ERROR state (e.g. after RESTORE_MAX_ATTEMPTS). No browser launch.
+ */
+function createInstanceStub(instanceId, name, webhookConfig, errorMessage) {
+  if (instances.has(instanceId)) return instances.get(instanceId);
+  const instance = new InstanceContext(instanceId, name, webhookConfig);
+  instance.state = InstanceState.ERROR;
+  instance.lastError = errorMessage || 'RESTORE_MAX_ATTEMPTS';
+  instance.lastErrorAt = new Date();
+  instance.restoreAttempts = config.restoreMaxAttempts ?? 5;
+  instances.set(instanceId, instance);
+  saveInstancesToDisk().catch((err) => console.error('[Persistence] Save failed:', err.message));
+  systemMode.recomputeFromInstances(() => getAllInstances());
+  return instance;
+}
+
+/**
+ * Load instances from disk and enqueue for sequential restore (no stampede).
  */
 async function loadInstancesFromDisk() {
+  const restoreScheduler = require('./restoreScheduler');
   try {
     const data = await fs.readFile(config.instancesDataPath, 'utf8');
     const instancesData = JSON.parse(data);
-    
+
     if (!Array.isArray(instancesData) || instancesData.length === 0) {
       console.log('[Persistence] No instances to restore');
       return;
     }
-    
-    console.log(`[Persistence] Restoring ${instancesData.length} instance(s)...`);
-    
-    for (const data of instancesData) {
-      try {
-        await createInstance(data.id, data.name, {
-          url: data.webhookUrl,
-          events: data.webhookEvents || [],
-          typingIndicatorEnabled: data.typingIndicatorEnabled,
-          applyTypingTo: data.applyTypingTo,
-        });
-      } catch (error) {
-        console.error(`[Persistence] Failed to restore ${data.id}:`, error.message);
-      }
+
+    console.log(`[Persistence] Restoring ${instancesData.length} instance(s) sequentially (no stampede)...`);
+    const concurrency = config.restoreConcurrency ?? 1;
+    if (concurrency !== 1) {
+      console.warn('[Persistence] RESTORE_CONCURRENCY should be 1 for small VMs; using sequential restore.');
     }
-    
-    console.log('[Persistence] Restoration completed');
+
+    for (const d of instancesData) {
+      restoreScheduler.enqueue({
+        id: d.id,
+        name: d.name,
+        webhookUrl: d.webhookUrl,
+        webhookEvents: d.webhookEvents || [],
+        typingIndicatorEnabled: d.typingIndicatorEnabled,
+        applyTypingTo: d.applyTypingTo,
+      });
+    }
+
+    const createFn = async (item) => {
+      if (item.type === 'retry') {
+        const r = await retryInstance(item.instanceId);
+        if (!r.ok) throw new Error(r.error || 'Retry failed');
+        return;
+      }
+      await createInstance(item.id, item.name, {
+        url: item.webhookUrl,
+        events: item.webhookEvents || [],
+        typingIndicatorEnabled: item.typingIndicatorEnabled,
+        applyTypingTo: item.applyTypingTo,
+      });
+    };
+    const markFailedFn = (item, message) => {
+      createInstanceStub(item.id, item.name, {
+        url: item.webhookUrl,
+        events: item.webhookEvents || [],
+        typingIndicatorEnabled: item.typingIndicatorEnabled,
+        applyTypingTo: item.applyTypingTo,
+      }, message);
+    };
+    restoreScheduler.startSchedulerLoop(createFn, markFailedFn);
+    console.log('[Persistence] Restoration queued; scheduler will process one at a time.');
   } catch (error) {
     if (error.code === 'ENOENT') {
       console.log('[Persistence] No instances file found - starting fresh');
@@ -2775,11 +2804,19 @@ async function retryInstance(instanceId) {
     setupEventListeners(instanceId, client);
     startPopupDismisser(client, `[${instanceId}]`);
     await client.initialize();
+    const { enableSyncLiteInterception } = require('./utils/syncLiteInterception');
+    enableSyncLiteInterception(client, instanceId);
     console.log(`[${instanceId}] Retry: client initialized, waiting for events`);
     return { ok: true, message: 'Retry started; instance is initializing.' };
   } catch (err) {
+    const { buildLaunchFailureMessage, logLaunchFailure } = require('./browser/launchOptions');
+    const launchErrorMsg = buildLaunchFailureMessage(err, instanceId);
+    instance.lastError = launchErrorMsg;
+    instance.lastErrorAt = new Date();
+    instance.lastErrorStack = err.stack;
+    logLaunchFailure(instanceId, err, launchErrorMsg);
     console.error(`[${instanceId}] Retry failed:`, err.message);
-    instance.transitionTo(InstanceState.ERROR, `Retry failed: ${err.message}`);
+    instance.transitionTo(InstanceState.ERROR, launchErrorMsg);
     return { ok: false, error: err.message };
   }
 }
@@ -2985,6 +3022,7 @@ module.exports = {
   sendPoll,
   ensureReady,
   waitForReadyEvent,
+  createInstanceStub,
   loadInstancesFromDisk,
   saveInstancesToDisk,
   clearQueue,
