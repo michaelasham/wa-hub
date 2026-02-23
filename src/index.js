@@ -34,12 +34,22 @@ app.get('/health', (req, res) => {
   const loadavg = os.loadavg();
   const cpuCount = os.cpus().length;
   const cpuPercent = cpuCount > 0 ? Math.min(100, (loadavg[0] / cpuCount) * 100) : 0;
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMemMB = Math.round((totalMem - freeMem) / 1048576);
+  const totalMemMB = Math.round(totalMem / 1048576);
+  const memPercent = totalMem > 0 ? Math.round(((totalMem - freeMem) / totalMem) * 100) : 0;
+  const processRssMB = Math.round(process.memoryUsage().rss / 1048576);
   res.json({
     status: 'ok',
     service: 'wa-hub',
     instanceCount: instanceManager.getInstanceCount ? instanceManager.getInstanceCount() : 0,
     cpuPercent: Math.round(cpuPercent * 10) / 10,
     loadavg: loadavg.map((l) => Math.round(l * 100) / 100),
+    memoryUsedMB: usedMemMB,
+    memoryTotalMB: totalMemMB,
+    memoryPercent: memPercent,
+    processRssMB,
   });
 });
 

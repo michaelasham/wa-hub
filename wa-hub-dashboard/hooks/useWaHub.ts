@@ -9,6 +9,10 @@ export interface HealthData {
   instanceCount?: number;
   cpuPercent?: number;
   loadavg?: number[];
+  memoryUsedMB?: number;
+  memoryTotalMB?: number;
+  memoryPercent?: number;
+  processRssMB?: number;
 }
 
 export function useHealth(refreshIntervalMs = 10000) {

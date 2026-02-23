@@ -238,10 +238,24 @@ export default function HomePage() {
           </Banner>
         )}
 
-        {reachable !== false && health?.cpuPercent != null && (
+        {reachable !== false && (health?.cpuPercent != null || health?.memoryTotalMB != null) && (
           <div style={{ marginBottom: '1rem' }}>
             <Text as="p" tone="subdued">
-              CPU usage: <strong>{health.cpuPercent}%</strong>
+              {health.cpuPercent != null && (
+                <>CPU: <strong>{health.cpuPercent}%</strong></>
+              )}
+              {health.cpuPercent != null && health.memoryTotalMB != null && ' · '}
+              {health.memoryTotalMB != null && (
+                <>
+                  RAM: <strong>
+                    {health.memoryUsedMB != null ? `${health.memoryUsedMB} MB` : '—'} / {health.memoryTotalMB} MB
+                    {health.memoryPercent != null ? ` (${health.memoryPercent}%)` : ''}
+                  </strong>
+                  {health.processRssMB != null && (
+                    <span style={{ opacity: 0.85 }}> · process: {health.processRssMB} MB</span>
+                  )}
+                </>
+              )}
               {health.instanceCount != null && (
                 <> · {health.instanceCount} instance{health.instanceCount !== 1 ? 's' : ''}</>
               )}
