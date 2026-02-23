@@ -255,13 +255,35 @@ class IdempotencyStore {
    */
   async getByInstance(instanceName, limit = 100) {
     await this.load();
-    
+
     const records = Array.from(this.cache.values())
       .filter(r => r.instanceName === instanceName)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, limit);
-    
+
     return records;
+  }
+
+  /**
+   * Remove all idempotency records for an instance (call when instance is deleted).
+   * @param {string} instanceName - Instance name (stored in record.instanceName)
+   * @returns {Promise<number>} Number of records removed
+   */
+  async deleteByInstanceName(instanceName) {
+    if (!instanceName) return 0;
+    await this.load();
+    let removed = 0;
+    for (const [key, record] of this.cache.entries()) {
+      if (record.instanceName === instanceName) {
+        this.cache.delete(key);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      await this.save();
+      console.log(`[IdempotencyStore] Removed ${removed} record(s) for instance "${instanceName}"`);
+    }
+    return removed;
   }
 }
 

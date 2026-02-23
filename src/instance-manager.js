@@ -2474,7 +2474,17 @@ async function deleteInstance(instanceId) {
     instance.clearRateLimitWakeTimer();
     stopSendLoop(instanceId);
 
+    const instanceName = instance.name;
     const client = instance.client;
+
+    await idempotencyStore.deleteByInstanceName(instanceName).catch((err) => {
+      result.warnings.push(`idempotency: ${err.message}`);
+      console.warn(`[${instanceId}] Idempotency cleanup warning:`, err.message);
+    });
+    revokeViewSessionTokensByInstanceId(instanceId);
+    const { deleteChromiumLogForInstance } = require('./browser/launchOptions');
+    await deleteChromiumLogForInstance(instanceId).catch(() => {});
+
     instances.delete(instanceId);
     await saveInstancesToDisk().catch(err => {
       result.warnings.push(`Save failed: ${err.message}`);
@@ -2983,6 +2993,24 @@ function revokeViewSessionToken(token) {
   const had = viewTokens.has(token);
   viewTokens.delete(token);
   return had;
+}
+
+/**
+ * Revoke all view session tokens for an instance (call when instance is deleted).
+ * @param {string} instanceId
+ * @returns {number} Number of tokens revoked
+ */
+function revokeViewSessionTokensByInstanceId(instanceId) {
+  if (!instanceId) return 0;
+  let revoked = 0;
+  for (const [token, entry] of viewTokens.entries()) {
+    if (entry.instanceId === instanceId) {
+      viewTokens.delete(token);
+      revoked++;
+    }
+  }
+  if (revoked > 0) console.log(`[${instanceId}] Revoked ${revoked} view session token(s)`);
+  return revoked;
 }
 
 /**

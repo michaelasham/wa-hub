@@ -76,6 +76,32 @@ const CHROME_LOG_DIR = process.env.CHROME_LOG_DIR || '/tmp';
 const STDERR_TAIL_MAX = 3500;
 
 /**
+ * Get the Chromium log file path for an instance (used for stderr capture and cleanup on delete).
+ * @param {string} instanceId
+ * @returns {string}
+ */
+function getChromiumLogPath(instanceId) {
+  if (!instanceId || typeof instanceId !== 'string') return '';
+  const safeId = instanceId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return path.join(CHROME_LOG_DIR, `wa-hub-chrome-${safeId}.log`);
+}
+
+/**
+ * Delete the Chromium log file for an instance (cleanup on instance delete). Ignores errors.
+ * @param {string} instanceId
+ */
+async function deleteChromiumLogForInstance(instanceId) {
+  const logPath = getChromiumLogPath(instanceId);
+  if (!logPath) return;
+  try {
+    await fs.promises.unlink(logPath);
+    console.log(`[Chromium] Deleted log file: ${logPath}`);
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn(`[Chromium] Could not delete log ${logPath}:`, err.message);
+  }
+}
+
+/**
  * Ensure --no-zygote is never used without --no-sandbox (Chromium error: "Zygote cannot be disabled if sandbox is enabled").
  * Mutates args: if --no-zygote present but --no-sandbox missing, logs and injects sandbox flags at front.
  * @param {string[]} args
@@ -214,8 +240,7 @@ function buildLaunchFailureMessage(err, instanceId, stderrMaxChars = STDERR_TAIL
   const msg = err && (err.message || String(err)) || 'Unknown launch error';
   let out = `LAUNCH_FAILED: ${msg}`;
   if (!instanceId || typeof instanceId !== 'string') return out;
-  const safeId = instanceId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-  const logPath = path.join(CHROME_LOG_DIR, `wa-hub-chrome-${safeId}.log`);
+  const logPath = getChromiumLogPath(instanceId);
   try {
     if (fs.existsSync(logPath)) {
       const buf = fs.readFileSync(logPath, 'utf8');
@@ -241,8 +266,10 @@ function logLaunchFailure(instanceId, err, lastErrorMsg) {
 module.exports = {
   getChosenExecutablePath,
   getChromiumLaunchArgs,
+  getChromiumLogPath,
   getPuppeteerLaunchOptions,
   logLaunchContext,
   buildLaunchFailureMessage,
   logLaunchFailure,
+  deleteChromiumLogForInstance,
 };
