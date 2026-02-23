@@ -137,9 +137,11 @@ export function ConnectionPanel({
                 )}
               </div>
               {(status as { lastError?: string } | null)?.lastError && (
-                <Text as="p" variant="bodySm" tone="critical" fontWeight="medium" style={{ marginTop: '0.25rem' }}>
-                  Error: {(status as { lastError: string }).lastError}
-                </Text>
+                <div style={{ marginTop: '0.25rem' }}>
+                  <Text as="p" variant="bodySm" tone="critical" fontWeight="medium">
+                    Error: {(status as { lastError: string }).lastError}
+                  </Text>
+                </div>
               )}
               <div style={{ marginTop: '0.25rem' }}>
                 <Text as="p" variant="bodySm" tone="subdued">
