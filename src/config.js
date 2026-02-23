@@ -32,8 +32,13 @@ const config = {
   
   // Chromium/Chrome executable path (for Puppeteer)
   chromePath: process.env.CHROME_PATH || '/usr/bin/chromium-browser', // Fallback: /usr/bin/chromium
-  // Only add --no-sandbox when explicitly set (e.g. Docker); default false for security
-  chromeDisableSandbox: process.env.CHROME_DISABLE_SANDBOX === '1' || process.env.CHROME_DISABLE_SANDBOX === 'true',
+  // Sandbox/zygote: must be consistent (--no-zygote requires --no-sandbox). Default 1 on Linux to avoid launch failures.
+  chromeDisableSandbox: process.env.CHROME_DISABLE_SANDBOX !== undefined && process.env.CHROME_DISABLE_SANDBOX !== ''
+    ? (process.env.CHROME_DISABLE_SANDBOX === '1' || process.env.CHROME_DISABLE_SANDBOX === 'true')
+    : (typeof process !== 'undefined' && process.platform === 'linux'),
+  chromeUseNoZygote: process.env.CHROME_USE_NO_ZYGOTE !== undefined && process.env.CHROME_USE_NO_ZYGOTE !== ''
+    ? (process.env.CHROME_USE_NO_ZYGOTE === '1' || process.env.CHROME_USE_NO_ZYGOTE === 'true')
+    : (typeof process !== 'undefined' && process.platform === 'linux'),
   chromeArgsExtra: process.env.CHROME_ARGS_EXTRA || '',
   wahubLogChromeArgs: process.env.WAHUB_LOG_CHROME_ARGS === '1' || process.env.WAHUB_LOG_CHROME_ARGS === 'true',
   

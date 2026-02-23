@@ -36,11 +36,10 @@ function getChosenExecutablePath() {
   return { path: null, exists: false };
 }
 
-/** Base Chromium args: memory/shm hardening, no GPU, no zygote, background throttling disabled */
+/** Base Chromium args: memory/shm hardening, no GPU. Sandbox/zygote added separately (--no-zygote only with --no-sandbox). */
 const BASE_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-gpu',
-  '--no-zygote',
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
@@ -77,16 +76,35 @@ const CHROME_LOG_DIR = process.env.CHROME_LOG_DIR || '/tmp';
 const STDERR_TAIL_MAX = 3500;
 
 /**
- * Returns the array of Chromium launch args. Optionally adds --enable-logging and --log-file for capture on failure.
+ * Ensure --no-zygote is never used without --no-sandbox (Chromium error: "Zygote cannot be disabled if sandbox is enabled").
+ * Mutates args: if --no-zygote present but --no-sandbox missing, logs and injects sandbox flags at front.
+ * @param {string[]} args
+ */
+function validateAndFixSandboxZygote(args) {
+  const hasNoZygote = args.includes('--no-zygote');
+  const hasNoSandbox = args.includes('--no-sandbox');
+  if (hasNoZygote && !hasNoSandbox) {
+    console.error('[Chromium] FATAL CONFIG: --no-zygote requires --no-sandbox. Auto-injecting --no-sandbox and --disable-setuid-sandbox.');
+    args.unshift('--no-sandbox', '--disable-setuid-sandbox');
+  }
+}
+
+/**
+ * Returns the array of Chromium launch args. Sandbox/zygote: add --no-sandbox (and optionally --no-zygote) only when enabled; --no-zygote only if sandbox disabled.
  * @param {string} [instanceId] - If set, add log file so buildLaunchFailureMessage can read stderr tail
  * @returns {string[]}
  */
 function getChromiumLaunchArgs(instanceId) {
-  const args = [...BASE_ARGS];
+  const args = [];
 
   if (config.chromeDisableSandbox) {
-    args.unshift('--no-sandbox', '--disable-setuid-sandbox');
+    args.push('--no-sandbox', '--disable-setuid-sandbox');
   }
+  if (config.chromeUseNoZygote && config.chromeDisableSandbox) {
+    args.push('--no-zygote');
+  }
+
+  args.push(...BASE_ARGS);
 
   if (config.chromeArgsExtra && config.chromeArgsExtra.trim()) {
     const extra = config.chromeArgsExtra.trim().split(/\s+/).filter(Boolean);
@@ -99,6 +117,7 @@ function getChromiumLaunchArgs(instanceId) {
     args.push('--enable-logging', '--v=1', `--log-file=${logFile}`);
   }
 
+  validateAndFixSandboxZygote(args);
   return args;
 }
 
@@ -141,12 +160,15 @@ function logLaunchContext(instanceId, opts = {}) {
       const availK = parseInt(parts[3], 10);
       if (!Number.isNaN(availK)) diskFreeTmp = `${availK}KB`;
     } catch (_) {}
+    const allArgs = opts.args || [];
     const debugLine = {
       instanceId,
       executablePath: opts.executablePath || 'bundled',
       headless: opts.headless !== false,
       argsCount,
-      argsSample: (opts.args || []).slice(0, 8),
+      noSandbox: allArgs.includes('--no-sandbox'),
+      noZygote: allArgs.includes('--no-zygote'),
+      argsSample: allArgs.slice(0, 12),
       uid: typeof process.getuid === 'function' ? process.getuid() : null,
       gid: typeof process.getgid === 'function' ? process.getgid() : null,
       totalMemMB: Math.round(totalMem / 1048576),

@@ -83,7 +83,8 @@ LOG_LEVEL=info
 | `READY_WATCHDOG_MS` | Timeout for ready event before soft-restart (ms) | `600000` (10 min) | No |
 | `DELETE_DESTROY_TIMEOUT_MS` | Timeout for client.destroy() on delete before purge (ms) | `15000` (15s) | No |
 | `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
-| `CHROME_DISABLE_SANDBOX` | Set to `1` to add `--no-sandbox` (e.g. some Docker setups); default off for security | `0` | No |
+| `CHROME_DISABLE_SANDBOX` | Set to `1` to add `--no-sandbox` and `--disable-setuid-sandbox`. Default **1 on Linux**, 0 elsewhere (avoids "Zygote cannot be disabled if sandbox is enabled") | `1` on Linux | No |
+| `CHROME_USE_NO_ZYGOTE` | Set to `1` to add `--no-zygote` (only applied when sandbox is disabled; never add `--no-zygote` without `--no-sandbox`) | `1` on Linux | No |
 | `CHROME_ARGS_EXTRA` | Extra Chromium flags (space-separated) | - | No |
 | `WAHUB_LOG_CHROME_ARGS` | Set to `1` to log full Chromium launch context (memory, versions) on each instance start | `0` | No |
 | `PUPPETEER_DUMPIO` | Set to `1` to pipe Chromium stderr to process (see PM2 logs on launch failure) | `0` | No |
@@ -139,7 +140,7 @@ The API key is configured via the `API_KEY` environment variable. If not set, au
 
 Login/sync can spike memory and trigger OOM or Chromium crashes on small VMs. Use these to keep instances stable:
 
-- **Chromium flags**: wa-hub applies hardened launch args by default (`--disable-dev-shm-usage`, `--disable-gpu`, `--no-zygote`, etc.). Do not add `--no-sandbox` unless needed (e.g. Docker); set `CHROME_DISABLE_SANDBOX=1`.
+- **Chromium flags**: wa-hub applies hardened launch args by default. On Linux, `CHROME_DISABLE_SANDBOX` and `CHROME_USE_NO_ZYGOTE` default to `1` so `--no-sandbox` and `--no-zygote` are set together (Chromium requires both if you use either). Set `CHROME_DISABLE_SANDBOX=0` only if you need sandbox enabled; never use `--no-zygote` without `--no-sandbox`.
 - **Shared memory (/dev/shm)**: We always pass `--disable-dev-shm-usage` as a fallback. If you run in **Docker**, increase shared memory: `docker run --shm-size=1g ...` or in compose add `shm_size: "1gb"`. Otherwise Chromium may crash during QR/auth.
 - **Swap on GCP VM (e2-medium 4GB)**: Add swap so the system doesn’t OOM during spikes:
   ```bash
