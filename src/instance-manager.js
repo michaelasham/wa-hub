@@ -2736,6 +2736,55 @@ function getInstanceCount() {
 }
 
 /**
+ * Retry initializing an instance that is in ERROR or FAILED_QR_TIMEOUT.
+ * Destroys existing client (if any), creates new client, and runs initialize (async).
+ * Does not await ready; caller gets immediate success and state updates via events.
+ * @param {string} instanceId
+ * @returns {{ ok: boolean; message?: string; error?: string }}
+ */
+async function retryInstance(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) {
+    return { ok: false, error: 'Instance not found' };
+  }
+  if (instance.state !== InstanceState.ERROR && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
+    return { ok: false, error: `Instance is not in ERROR/FAILED_QR_TIMEOUT (state: ${instance.state}). Use restart for other states.` };
+  }
+
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
+  instance.clearMessageFallbackPoller();
+  instance.clearConnectingWatchdog();
+  instance.clearHealthCheck();
+
+  if (instance.client) {
+    try {
+      await instance.client.destroy().catch(() => {});
+    } catch (_) {}
+    instance.client = null;
+    instance.debugWsEndpoint = null;
+  }
+
+  instance.transitionTo(InstanceState.CONNECTING, 'retry after ERROR');
+  instance.startConnectingWatchdog();
+  instance.qrReceivedDuringRestart = false;
+
+  try {
+    const client = await createClient(instanceId, instance.name);
+    instance.client = client;
+    setupEventListeners(instanceId, client);
+    startPopupDismisser(client, `[${instanceId}]`);
+    await client.initialize();
+    console.log(`[${instanceId}] Retry: client initialized, waiting for events`);
+    return { ok: true, message: 'Retry started; instance is initializing.' };
+  } catch (err) {
+    console.error(`[${instanceId}] Retry failed:`, err.message);
+    instance.transitionTo(InstanceState.ERROR, `Retry failed: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
  * Get diagnostic info for an instance (for debugging stuck NEEDS_QR/CONNECTING)
  */
 function getInstanceDiagnostics(instanceId) {
@@ -2952,4 +3001,5 @@ module.exports = {
   runOutboundAction,
   deliverBufferedInbound,
   startNeedsQrWatchdog,
+  retryInstance,
 };

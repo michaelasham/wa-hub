@@ -1041,6 +1041,29 @@ router.post('/instances/:id/restart', async (req, res) => {
   }
 });
 
+/**
+ * POST /instances/:id/retry
+ * Retry initializing an instance in ERROR or FAILED_QR_TIMEOUT (e.g. after "Failed to launch the browser process").
+ * Does not require delete + recreate; preserves instance config and auth path.
+ */
+router.post('/instances/:id/retry', async (req, res) => {
+  try {
+    const instanceId = sanitizeInstanceId(getInstanceId(req.params));
+    if (!isValidInstanceId(instanceId)) {
+      return res.status(400).json(createErrorResponse('Invalid instance ID', 400));
+    }
+    const result = await instanceManager.retryInstance(instanceId);
+    if (!result.ok) {
+      const status = result.error?.includes('not found') ? 404 : 400;
+      return res.status(status).json(createErrorResponse(result.error || 'Retry failed', status));
+    }
+    return res.json(createSuccessResponse({ message: result.message, instanceId }));
+  } catch (error) {
+    console.error('Error retrying instance:', error);
+    return res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
 function getSystemStatusPayload() {
   const sys = systemMode.getSystemMode();
   const now = Date.now();
