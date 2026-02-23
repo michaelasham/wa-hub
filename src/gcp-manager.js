@@ -19,6 +19,29 @@ const storage = new Storage(config.gcpProjectId ? { projectId: config.gcpProject
 
 const POLL_MS = 10000;
 const MAX_ATTEMPTS = 2;
+/** Wait up to this long for launchpad app to respond on /health after VM is RUNNING */
+const LAUNCHPAD_APP_READY_MS = 120000;
+
+function waitForLaunchpadHealth(baseUrl) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + LAUNCHPAD_APP_READY_MS;
+    const http = require('http');
+    const healthUrl = baseUrl.replace(/\/$/, '') + '/health';
+    function tryOnce() {
+      if (Date.now() >= deadline) return resolve(false);
+      const req = http.get(healthUrl, { timeout: 5000 }, (res) => {
+        if (res.statusCode === 200) return resolve(true);
+        scheduleNext();
+      });
+      req.on('error', () => scheduleNext());
+      req.on('timeout', () => { req.destroy(); scheduleNext(); });
+    }
+    function scheduleNext() {
+      setTimeout(tryOnce, 5000);
+    }
+    tryOnce();
+  });
+}
 
 async function startLaunchpad() {
   const project = config.gcpProjectId;
@@ -41,7 +64,10 @@ async function startLaunchpad() {
           const internalIp = existing.networkInterfaces?.[0]?.networkIP;
           if (internalIp) {
             sentry.addBreadcrumb({ category: 'launchpad', message: 'Launchpad VM RUNNING', level: 'info', data: { internalIp } });
-            return { internalIp, baseUrl: `http://${internalIp}:3000` };
+            const baseUrl = `http://${internalIp}:3000`;
+            const appReady = await waitForLaunchpadHealth(baseUrl);
+            if (appReady) sentry.addBreadcrumb({ category: 'launchpad', message: 'Launchpad app /health OK', level: 'info' });
+            return { internalIp, baseUrl };
           }
         }
         if (status === 'TERMINATED' || status === 'STOPPED') {
@@ -116,7 +142,10 @@ async function startLaunchpad() {
           const internalIp = meta.networkInterfaces?.[0]?.networkIP;
           if (internalIp) {
             sentry.addBreadcrumb({ category: 'launchpad', message: 'Launchpad VM RUNNING', level: 'info', data: { internalIp } });
-            return { internalIp, baseUrl: `http://${internalIp}:3000` };
+            const baseUrl = `http://${internalIp}:3000`;
+            const appReady = await waitForLaunchpadHealth(baseUrl);
+            if (appReady) sentry.addBreadcrumb({ category: 'launchpad', message: 'Launchpad app /health OK', level: 'info' });
+            return { internalIp, baseUrl };
           }
         }
       }

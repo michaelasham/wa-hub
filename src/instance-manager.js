@@ -2199,12 +2199,11 @@ const LAUNCHPAD_MAX_ATTEMPTS = 2;
  */
 async function createInstanceViaLaunchpad(instanceId, name, webhookConfig) {
   const gcpManager = require('./gcp-manager');
-  let baseUrl = config.launchpadInternalUrl;
   for (let attempt = 1; attempt <= LAUNCHPAD_MAX_ATTEMPTS; attempt++) {
     try {
       sentry.addBreadcrumb({ category: 'launchpad', message: 'Starting launchpad VM', level: 'info', data: { attempt } });
-      const { baseUrl: startedUrl } = await gcpManager.startLaunchpad();
-      if (startedUrl) baseUrl = startedUrl;
+      // Always use the URL returned by startLaunchpad(); do not use config.launchpadInternalUrl
+      const { baseUrl } = await gcpManager.startLaunchpad();
       if (!baseUrl) throw new Error('Launchpad base URL not available');
       const secret = config.launchpadInternalSecret;
       const headers = { 'Content-Type': 'application/json', 'X-Launchpad-Secret': secret };

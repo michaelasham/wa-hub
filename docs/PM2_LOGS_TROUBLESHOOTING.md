@@ -64,3 +64,45 @@ The "middleware" file convention is deprecated. Please use "proxy" instead.
 **Cause:** Next.js 16+ deprecation; your middleware file still uses the old convention.
 
 **Fix:** Follow the [Next.js proxy docs](https://nextjs.org/docs/messages/middleware-to-proxy) and migrate when you can. The app still runs; this is a warning, not a runtime error.
+
+---
+
+## 4. Dashboard not working (blank page, "unreachable", 401)
+
+**Checks on the VM:**
+
+1. **PM2 has the dashboard process**
+   ```bash
+   pm2 status
+   ```
+   You should see both `wa-hub` and `wa-hub-dashboard`. If the dashboard is missing, start both:
+   ```bash
+   cd ~/wa-hub && pm2 start ecosystem.config.js
+   ```
+
+2. **Dashboard env (wa-hub backend URL and token)**  
+   The dashboard needs a `.env` file inside `wa-hub-dashboard/` (or env vars passed by ecosystem from the dashboard `.env`). Ecosystem loads `wa-hub-dashboard/.env`. Create or edit it:
+   ```bash
+   cd ~/wa-hub/wa-hub-dashboard
+   # Create .env with at least:
+   # WA_HUB_BASE_URL=http://localhost:3000
+   # WA_HUB_TOKEN=your-wa-hub-API-key
+   ```
+   If wa-hub runs on the same machine, use `http://localhost:3000`. If the browser is on another machine, use the VM’s URL (e.g. `http://YOUR_VM_IP:3000`).  
+   If wa-hub has no `API_KEY` set, you can leave `WA_HUB_TOKEN` empty (dashboard will still call the API).
+
+3. **Dashboard logs**
+   ```bash
+   pm2 logs wa-hub-dashboard --lines 50
+   ```
+   Look for build errors (`next build` in prestart), port in use (use 3001, not 3000), or missing deps. Install deps if needed:
+   ```bash
+   cd ~/wa-hub/wa-hub-dashboard && npm install
+   pm2 restart wa-hub-dashboard
+   ```
+
+4. **Port**  
+   Dashboard must use **3001**. Do not set `PORT=3000` for the dashboard (that’s the backend). Ecosystem sets `PORT: 3001` for the dashboard app.
+
+5. **First start**  
+   The first time the dashboard runs, `prestart` runs `next build`, which can take 1–2 minutes. Check logs until you see “Ready” or “compiled successfully”.
