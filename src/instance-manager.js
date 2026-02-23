@@ -14,6 +14,14 @@ const idempotencyStore = require('./idempotency-store');
 const { withTypingIndicator } = require('./utils/typingIndicator');
 const { startPopupDismisser } = require('./utils/whatsappWebPopupDismisser');
 const { markSeenAfterSend, markSeenOnRelevantIncoming } = require('./utils/selectiveSeen');
+const sentry = require('./observability/sentry');
+const systemMode = require('./systemMode');
+const inboundBuffer = require('./queues/inboundBuffer');
+
+/** Hash identifier for breadcrumbs (no PII). */
+function hashForBreadcrumb(str) {
+  return crypto.createHash('sha256').update(String(str)).digest('hex').slice(0, 10);
+}
 
 /**
  * Debug patch: structured JSON log for debugging disconnect/ready delays
@@ -37,6 +45,7 @@ const InstanceState = {
   ERROR: 'error',
   RESTRICTED: 'restricted',  // Detected restriction - long cooldown, no reconnect
   PAUSED: 'paused',          // Cooldown or rate limit - pause sends, no reconnect until window expires
+  FAILED_QR_TIMEOUT: 'failed_qr_timeout', // Stuck in NEEDS_QR past TTL / max recovery attempts
 };
 
 /**
@@ -79,6 +88,13 @@ class InstanceContext {
     this.displayName = null;
     this.qrCode = null;
     this.lastQrUpdate = null;
+    this.lastQrAt = null; // Last time we received a QR event (for stale detection)
+
+    // NEEDS_QR timeout & recovery
+    this.needsQrSince = null;       // When instance entered NEEDS_QR
+    this.qrRecoveryAttempts = 0;    // Number of recovery attempts for this NEEDS_QR session
+    this.nextQrRecoveryAt = null;   // Earliest time to run next recovery (backoff)
+    this.lastStateChangeAt = new Date();
     
     // Event-driven readiness promise
     this.readyPromise = null;
@@ -188,10 +204,22 @@ class InstanceContext {
     const oldState = this.state;
     this.state = newState;
     this.lastEvent = newState;
+    this.lastStateChangeAt = new Date();
     const ts = new Date().toISOString();
 
     debugLog(this.id, 'state_transition', { from: oldState, to: newState, reason: reason || undefined });
     console.log(`[${ts}] [${this.id}] State transition: ${oldState} -> ${newState}${reason ? ` (${reason})` : ''}`);
+
+    if (newState === InstanceState.NEEDS_QR) {
+      this.needsQrSince = new Date();
+      this.lastQrAt = null;
+      this.qrRecoveryAttempts = 0;
+      this.nextQrRecoveryAt = null;
+    }
+    if (newState === InstanceState.CONNECTING || newState === InstanceState.NEEDS_QR) {
+      systemMode.enterSyncing(this.id);
+    }
+    systemMode.recomputeFromInstances(() => Array.from(instances.values()));
     
     // Handle state-specific actions
     if (newState === InstanceState.READY) {
@@ -241,7 +269,7 @@ class InstanceContext {
           this.readyTimeout = null;
         }
       }
-    } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR || newState === InstanceState.RESTRICTED || newState === InstanceState.PAUSED) {
+    } else if (newState === InstanceState.NEEDS_QR || newState === InstanceState.ERROR || newState === InstanceState.RESTRICTED || newState === InstanceState.PAUSED || newState === InstanceState.FAILED_QR_TIMEOUT) {
       // Stop send loop on terminal / hold states
       stopSendLoop(this.id);
       if (newState !== InstanceState.PAUSED) {
@@ -575,6 +603,7 @@ function startHealthCheck(instanceId) {
   const idleThresholdMin = config.zombieInactivityThresholdMin || 30;
 
   instance.healthCheckTimer = setInterval(async () => {
+    if (!systemMode.shouldRunBackgroundTask('health_check')) return;
     const inst = instances.get(instanceId);
     if (!inst || inst.state !== InstanceState.READY) return;
 
@@ -681,6 +710,156 @@ async function onConnectingWatchdogTimeout(instanceId) {
   }
 }
 
+/** Backoff sequence for QR recovery (seconds): 10s, 30s, 60s */
+const QR_RECOVERY_BACKOFF_MS = [10000, 30000, 60000];
+
+/**
+ * Recover a stuck NEEDS_QR instance: soft (reload page), hard (destroy+recreate), or nuclear (logout+purge+recreate).
+ * Increments qrRecoveryAttempts and sets nextQrRecoveryAt. Logs + Sentry.
+ */
+async function recoverNeedsQrInstance(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance || instance.state !== InstanceState.NEEDS_QR) return;
+
+  const attempt = (instance.qrRecoveryAttempts || 0) + 1;
+  const maxAttempts = config.qrMaxRecoveryAttempts || 3;
+  if (attempt > maxAttempts) return;
+
+  const backoffArr = config.qrRecoveryBackoffMs || QR_RECOVERY_BACKOFF_MS;
+  const backoffMs = backoffArr[Math.min(attempt - 1, backoffArr.length - 1)] ?? backoffArr[backoffArr.length - 1];
+
+  const shop = (instanceId || '').replace(/^WASP-/, '').slice(0, 32);
+  sentry.captureMessage('QR recovery attempt', 'info', {
+    instanceId,
+    shop,
+    attempt,
+    maxAttempts: maxAttempts,
+  });
+  console.log(`[${instanceId}] QR recovery attempt ${attempt}/${maxAttempts} (backoff after: ${backoffMs}ms)`);
+
+  instance.qrRecoveryAttempts = attempt;
+  instance.nextQrRecoveryAt = new Date(Date.now() + backoffMs);
+
+  try {
+    if (attempt === 1) {
+      // Soft: reload WA page to re-trigger QR
+      if (instance.client?.pupPage && !instance.client.pupPage.isClosed?.()) {
+        await instance.client.pupPage.reload({ waitUntil: 'domcontentloaded' }).catch((err) => {
+          console.warn(`[${instanceId}] QR recovery soft (reload) failed:`, err.message);
+        });
+      } else {
+        console.warn(`[${instanceId}] QR recovery soft skipped (no page)`);
+      }
+    } else if (attempt === 2) {
+      // Hard: destroy client and recreate + initialize (no wait for ready)
+      instance.clearReadyWatchdog();
+      instance.clearReadyPoll();
+      instance.clearMessageFallbackPoller();
+      instance.clearConnectingWatchdog();
+      if (instance.client) {
+        try {
+          await instance.client.destroy().catch(() => {});
+        } catch (_) {}
+        instance.client = null;
+        instance.debugWsEndpoint = null;
+      }
+      const client = await createClient(instanceId, instance.name);
+      instance.client = client;
+      setupEventListeners(instanceId, client);
+      startPopupDismisser(client, `[${instanceId}]`);
+      instance.transitionTo(InstanceState.CONNECTING, 'QR recovery hard restart');
+      instance.startConnectingWatchdog();
+      await client.initialize().catch((err) => {
+        console.error(`[${instanceId}] QR recovery hard initialize error:`, err.message);
+      });
+    } else {
+      // Nuclear: logout (best-effort), destroy, purge auth, recreate + initialize
+      instance.clearReadyWatchdog();
+      instance.clearReadyPoll();
+      instance.clearMessageFallbackPoller();
+      instance.clearConnectingWatchdog();
+      if (instance.client) {
+        try {
+          await instance.client.logout();
+        } catch (_) {}
+        try {
+          await instance.client.destroy().catch(() => {});
+        } catch (_) {}
+        instance.client = null;
+        instance.debugWsEndpoint = null;
+      }
+      await purgeLocalAuthSession(instanceId);
+      const client = await createClient(instanceId, instance.name);
+      instance.client = client;
+      setupEventListeners(instanceId, client);
+      startPopupDismisser(client, `[${instanceId}]`);
+      instance.transitionTo(InstanceState.CONNECTING, 'QR recovery nuclear (auth purged)');
+      instance.startConnectingWatchdog();
+      await client.initialize().catch((err) => {
+        console.error(`[${instanceId}] QR recovery nuclear initialize error:`, err.message);
+      });
+    }
+  } catch (err) {
+    console.error(`[${instanceId}] QR recovery attempt ${attempt} failed:`, err.message);
+    sentry.captureException(err, { tags: { instanceId, shop, attempt: String(attempt) } });
+  }
+}
+
+let needsQrWatchdogTimer = null;
+
+/**
+ * NEEDS_QR watchdog: detect stuck/stale QR and run recovery or mark FAILED_QR_TIMEOUT.
+ * Runs every QR_RECOVERY_WATCHDOG_INTERVAL_MS.
+ */
+function runNeedsQrWatchdog() {
+  if (!systemMode.shouldRunBackgroundTask('needs_qr_watchdog')) return;
+  const now = Date.now();
+  const staleMs = config.qrStaleMs || 90000;
+  const ttlMs = config.qrTtlMs || 300000;
+  const maxAttempts = config.qrMaxRecoveryAttempts || 3;
+
+  for (const instance of instances.values()) {
+    if (instance.state !== InstanceState.NEEDS_QR) continue;
+
+    const needsQrSince = instance.needsQrSince ? new Date(instance.needsQrSince).getTime() : 0;
+    const lastQrAt = instance.lastQrAt ? new Date(instance.lastQrAt).getTime() : 0;
+    const ageMs = needsQrSince > 0 ? now - needsQrSince : 0;
+    const sinceLastQrMs = lastQrAt > 0 ? now - lastQrAt : Infinity;
+
+    const isStale = (lastQrAt === 0 || sinceLastQrMs > staleMs) || ageMs > ttlMs;
+    if (!isStale) continue;
+
+    const attempts = instance.qrRecoveryAttempts || 0;
+    const nextAt = instance.nextQrRecoveryAt ? new Date(instance.nextQrRecoveryAt).getTime() : 0;
+    const mayRecover = attempts < maxAttempts && (nextAt === 0 || now >= nextAt);
+
+    if (mayRecover) {
+      void recoverNeedsQrInstance(instance.id);
+    } else if (attempts >= maxAttempts) {
+      instance.clearConnectingWatchdog();
+      instance.lastError = `NEEDS_QR timeout: no progress after ${maxAttempts} recovery attempts (age ${Math.round(ageMs / 1000)}s)`;
+      instance.lastErrorAt = new Date();
+      console.error(`[${instance.id}] NEEDS_QR timeout: marking FAILED_QR_TIMEOUT (attempts=${attempts}, age=${Math.round(ageMs / 1000)}s)`);
+      instance.transitionTo(InstanceState.FAILED_QR_TIMEOUT, instance.lastError);
+      sentry.captureMessage('NEEDS_QR timeout', 'warning', {
+        instanceId: instance.id,
+        attempts,
+        ageSeconds: Math.round(ageMs / 1000),
+      });
+    }
+  }
+}
+
+/**
+ * Start the NEEDS_QR watchdog interval. Idempotent.
+ */
+function startNeedsQrWatchdog() {
+  if (needsQrWatchdogTimer) return;
+  const intervalMs = config.qrRecoveryWatchdogIntervalMs || 10000;
+  needsQrWatchdogTimer = setInterval(runNeedsQrWatchdog, intervalMs);
+  console.log(`[NeedsQrWatchdog] Started (interval=${intervalMs}ms)`);
+}
+
 /**
  * Record webhook error for observability. Stores error, logs once per failure type (avoid spam).
  * Does NOT rethrow.
@@ -779,43 +958,57 @@ function processIncomingMessage(instanceId, message) {
 }
 
 /**
- * Forward webhook event (never blocks state transitions - failures are logged only)
- * Callers use .catch(err => recordWebhookError(instanceId, err)) - do NOT rethrow.
+ * Perform the actual webhook HTTP POST (shared by forwardWebhook and deliverBufferedInbound).
+ */
+async function deliverWebhookPost(instanceId, event, data, webhookUrl) {
+  const instance = instances.get(instanceId);
+  const payload = { event, instanceId, data };
+  const headers = { 'Content-Type': 'application/json' };
+  if (config.webhookSecret) {
+    const hmac = crypto.createHmac('sha256', config.webhookSecret);
+    hmac.update(JSON.stringify(payload));
+    headers['x-wa-hub-signature'] = hmac.digest('hex');
+  }
+  if (config.webhookProtectionBypass) {
+    headers['x-vercel-protection-bypass'] = config.webhookProtectionBypass;
+  }
+  if (config.webhookAuthToken) {
+    headers['Authorization'] = `Bearer ${config.webhookAuthToken}`;
+  }
+  await axios.post(webhookUrl, payload, { headers });
+  if (instance) {
+    instance.lastWebhookEvent = event;
+    instance.lastWebhookStatus = 'ok';
+    instance.lastWebhookAt = new Date();
+    instance.lastWebhookError = null;
+  }
+  console.log(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarded: ${event}`);
+}
+
+/**
+ * Forward webhook event (never blocks state transitions - failures are logged only).
+ * During SYNCING, message and vote_update are buffered; others are sent immediately.
  */
 async function forwardWebhook(instanceId, event, data) {
   const instance = instances.get(instanceId);
   if (!instance || !instance.webhookUrl) return;
 
-  // authenticated and ready always forwarded; other events follow webhookEvents filter
   const alwaysSend = ['authenticated', 'ready', 'ready_timeout'];
   const shouldSend = alwaysSend.includes(event) ||
     instance.webhookEvents.length === 0 ||
     instance.webhookEvents.includes(event);
   if (!shouldSend) return;
 
-  const payload = { event, instanceId, data };
+  if (systemMode.getSystemMode().mode === 'syncing' && (event === 'message' || event === 'vote_update')) {
+    const minimalData = event === 'message' && data?.message
+      ? { message: { ...data.message, body: (data.message.body || '').substring(0, 500) } }
+      : data;
+    inboundBuffer.push({ instanceId, eventType: event, data: minimalData, webhookUrl: instance.webhookUrl });
+    return;
+  }
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    if (config.webhookSecret) {
-      const crypto = require('crypto');
-      const hmac = crypto.createHmac('sha256', config.webhookSecret);
-      const signature = hmac.update(JSON.stringify(payload)).digest('hex');
-      headers['x-wa-hub-signature'] = signature;
-    }
-    if (config.webhookProtectionBypass) {
-      headers['x-vercel-protection-bypass'] = config.webhookProtectionBypass;
-    }
-    // Optional: send Bearer token if receiver requires API-key auth (fixes 401 on protected webhook endpoints)
-    if (config.webhookAuthToken) {
-      headers['Authorization'] = `Bearer ${config.webhookAuthToken}`;
-    }
-    await axios.post(instance.webhookUrl, payload, { headers });
-    instance.lastWebhookEvent = event;
-    instance.lastWebhookStatus = 'ok';
-    instance.lastWebhookAt = new Date();
-    instance.lastWebhookError = null;
-    console.log(`[${new Date().toISOString()}] [${instanceId}] Webhook forwarded: ${event}`);
+    await deliverWebhookPost(instanceId, event, data, instance.webhookUrl);
   } catch (error) {
     instance.lastWebhookEvent = event;
     instance.lastWebhookStatus = 'failed';
@@ -823,6 +1016,13 @@ async function forwardWebhook(instanceId, event, data) {
     instance.lastWebhookError = error.message;
     recordWebhookError(instanceId, error);
   }
+}
+
+/**
+ * Deliver a single buffered inbound event (used when flushing after SYNCING).
+ */
+async function deliverBufferedInbound(entry) {
+  await deliverWebhookPost(entry.instanceId, entry.eventType, entry.data, entry.webhookUrl);
 }
 
 /**
@@ -914,60 +1114,11 @@ async function copyDirectory(src, dest) {
  */
 async function createClient(instanceId, instanceName) {
   const sanitizedClientId = sanitizeInstanceId(instanceId);
-  
-  // Build Puppeteer config with robust args for headless Linux environments
-  // Keep args minimal to avoid conflicts that could cause "Execution context destroyed" errors
-  const puppeteerArgs = [
-    // Essential for headless Linux
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      
-      // Basic headless optimizations
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-breakpad',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-default-apps',
-      '--disable-features=TranslateUI',
-      '--disable-ipc-flooding-protection',
-      '--disable-notifications',
-      '--disable-prompt-on-repost',
-      '--disable-renderer-backgrounding',
-      '--disable-sync',
-      '--force-color-profile=srgb',
-      '--hide-scrollbars',
-      '--metrics-recording-only',
-      '--mute-audio',
-      '--no-first-run',
-      '--disable-blink-features=AutomationControlled',
-      
-      // Fix for xdg-settings and snap cgroup issues
-      '--disable-x11-autolaunch',
-      '--disable-application-cache',
-      '--disable-plugins-discovery',
-      
-      // Network and security (minimal set)
-      '--ignore-certificate-errors',
-      '--ignore-certificate-errors-spki-list',
-      '--no-default-browser-check',
-      '--no-pings',
-      
-      // Display
-      '--window-size=1920,1080',
-      '--log-level=3', // Suppress non-fatal errors
-      
-      // Cache size limits (prevent disk bloat)
-      '--disk-cache-size=104857600', // 100MB disk cache limit
-    '--media-cache-size=104857600', // 100MB media cache limit (if supported)
-  ];
+  const { getChromiumLaunchArgs, logLaunchContext } = require('./browser/launchOptions');
 
-  // View Live Session: remote debugging for founder-only testing (always enabled)
-  puppeteerArgs.push('--remote-debugging-port=0'); // Random free port
+  // Centralized Chromium args (memory/shm hardening, configurable via env)
+  const puppeteerArgs = getChromiumLaunchArgs();
+  puppeteerArgs.push('--remote-debugging-port=0'); // View Live Session (random free port)
 
   const puppeteerConfig = {
     headless: true,
@@ -1001,6 +1152,12 @@ async function createClient(instanceId, instanceName) {
   } else {
     console.log(`[${instanceId}] No system Chrome found, using Puppeteer bundled Chromium`);
   }
+
+  logLaunchContext(instanceId, {
+    executablePath: puppeteerConfig.executablePath || 'bundled',
+    headless: true,
+    argsCount: puppeteerArgs.length,
+  });
   
   return new Client({
     authStrategy: new LocalAuth({
@@ -1023,6 +1180,8 @@ function setupEventListeners(instanceId, client) {
   const instance = instances.get(instanceId);
   if (!instance) return;
 
+  sentry.addBreadcrumb({ category: 'whatsapp', message: 'client_init', level: 'info', data: { instanceId } });
+
   const guard = () => !instances.has(instanceId);
 
   // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
@@ -1033,12 +1192,14 @@ function setupEventListeners(instanceId, client) {
     instance.lastLifecycleEventAt = new Date();
     debugLog(instanceId, 'qr', {});
     console.log(`[${ts}] [${instanceId}] Event: qr`);
+    sentry.addBreadcrumb({ category: 'whatsapp', message: 'qr_generated', level: 'info', data: { instanceId } });
     instance.qrReceivedDuringRestart = true;
     instance.readyWatchdogRestarted = false;
     instance.startReadyWatchdog();
     instance.clearConnectingWatchdog();
     instance.connectingWatchdogRestartCount = 0; // Progress: got QR
     instance.transitionTo(InstanceState.NEEDS_QR, 'QR code received');
+    instance.lastQrAt = new Date();
     qrToBase64(qr).then((qrBase64) => {
       if (guard()) return;
       instance.qrCode = qrBase64;
@@ -1147,6 +1308,7 @@ function setupEventListeners(instanceId, client) {
 
   // Fallback: poll unread messages when message events fail (whatsapp-web.js v1.34 bug)
   async function runMessageFallbackPoll() {
+    if (!systemMode.shouldRunBackgroundTask('message_fallback_poll')) return;
     if (!instances.has(instanceId)) return;
     const inst = instances.get(instanceId);
     if (!inst || inst.state !== InstanceState.READY || !inst.client) return;
@@ -1189,6 +1351,7 @@ function setupEventListeners(instanceId, client) {
   // Authenticated event - transition from NEEDS_QR to CONNECTING (syncing) until ready
   client.on('authenticated', () => {
     if (guard()) return;
+    sentry.addBreadcrumb({ category: 'whatsapp', message: 'authenticated', level: 'info', data: { instanceId } });
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'authenticated';
     instance.lastLifecycleEventAt = new Date();
@@ -1214,12 +1377,15 @@ function setupEventListeners(instanceId, client) {
   // Ready event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('ready', () => {
     if (guard()) return;
+    sentry.addBreadcrumb({ category: 'whatsapp', message: 'ready', level: 'info', data: { instanceId } });
     markReady('event');
   });
   
   // Auth failure - state transition FIRST, webhook fire-and-forget
   client.on('auth_failure', (msg) => {
     if (guard()) return;
+    sentry.addBreadcrumb({ category: 'whatsapp', message: 'auth_failure', level: 'warning', data: { instanceId } });
+    sentry.captureMessage('WhatsApp auth_failure', 'warning', { instanceId, reason: String(msg).slice(0, 200) });
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'auth_failure';
     instance.lastLifecycleEventAt = new Date();
@@ -1240,6 +1406,8 @@ function setupEventListeners(instanceId, client) {
   client.on('disconnected', (reason) => {
     if (guard()) return;
     const reasonStr = reason || 'unknown';
+    sentry.addBreadcrumb({ category: 'whatsapp', message: 'disconnected', level: 'warning', data: { instanceId } });
+    sentry.captureMessage('WhatsApp disconnected', 'warning', { instanceId, reason: reasonStr.slice(0, 200) });
     instance.lastLifecycleEvent = 'disconnected';
     instance.lastLifecycleEventAt = new Date();
     debugLog(instanceId, 'disconnected', { reason: reasonStr });
@@ -1388,7 +1556,7 @@ function waitForReadyEvent(instanceId, timeoutMs = config.readyTimeoutMs) {
   }
   
   // If terminal state, reject immediately
-  if (instance.state === InstanceState.NEEDS_QR || instance.state === InstanceState.ERROR || instance.state === InstanceState.RESTRICTED) {
+  if (instance.state === InstanceState.NEEDS_QR || instance.state === InstanceState.ERROR || instance.state === InstanceState.RESTRICTED || instance.state === InstanceState.FAILED_QR_TIMEOUT) {
     return Promise.reject(new Error(`Instance in terminal state: ${instance.state}`));
   }
   
@@ -1465,6 +1633,7 @@ async function hardRestartAndWaitReady(instanceId, timeoutMs = config.readyTimeo
     throw new Error(`Instance ${instanceId} not found`);
   }
   
+  sentry.addBreadcrumb({ category: 'whatsapp', message: 'browser_restart', level: 'info', data: { instanceId } });
   console.log(`[${instanceId}] Starting hard restart...`);
   instance.clearReadyWatchdog();
   instance.clearReadyPoll();
@@ -1523,8 +1692,8 @@ async function ensureReady(instanceId) {
   if (instance.state === InstanceState.NEEDS_QR) {
     throw new Error(`Instance ${instanceId} needs QR code. Manual intervention required.`);
   }
-  if (instance.state === InstanceState.ERROR) {
-    throw new Error(`Instance ${instanceId} is in ERROR state. Check logs.`);
+  if (instance.state === InstanceState.ERROR || instance.state === InstanceState.FAILED_QR_TIMEOUT) {
+    throw new Error(`Instance ${instanceId} is in ${instance.state} state. Check logs.`);
   }
   if (instance.state === InstanceState.RESTRICTED) {
     const until = instance.restrictedUntil?.toISOString() || 'unknown';
@@ -1651,10 +1820,10 @@ async function processQueueItem(instanceId, item) {
   
   // Ensure instance is ready
   if (instance.state !== InstanceState.READY) {
-    if (instance.state === InstanceState.PAUSED || instance.state === InstanceState.RESTRICTED) {
+    if (instance.state === InstanceState.PAUSED || instance.state === InstanceState.RESTRICTED || instance.state === InstanceState.FAILED_QR_TIMEOUT) {
       return false; // Defer - cooldown/restriction, no ensureReady (manual intervention preferred)
     }
-    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR) {
+    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
       console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), triggering ensureReady to reconnect`);
       Promise.resolve(ensureReady(instanceId)).catch(err => {
         console.error(`[${instanceId}] ensureReady failed:`, err);
@@ -1665,107 +1834,134 @@ async function processQueueItem(instanceId, item) {
     return false; // Cannot process now
   }
   
-  // Send the message/poll with optional typing indicator
-  try {
-    let sentMessage;
-    
-    // Determine if typing should be applied
-    const shouldApplyTyping = instance.state === InstanceState.READY &&
-                              instance.typingIndicatorEnabled &&
-                              item.uxTyping !== false; // Default true, but can be disabled per message
-    
-    // Wrap send with typing indicator if enabled
-    const sendFn = async () => {
-      if (item.type === 'message') {
-        return await instance.client.sendMessage(item.payload.chatId, item.payload.message, { sendSeen: false });
-      } else if (item.type === 'poll') {
-        const { Poll } = require('whatsapp-web.js');
-        const poll = new Poll(item.payload.caption, item.payload.options, {
-          allowMultipleAnswers: item.payload.multipleAnswers === true,
-        });
-        return await instance.client.sendMessage(item.payload.chatId, poll, { sendSeen: false });
-      }
-    };
-    
-    if (shouldApplyTyping) {
-      sentMessage = await withTypingIndicator(
-        instance.client,
-        item.payload.chatId,
-        sendFn,
-        {
-          enabled: true,
-          timeoutMs: config.typingIndicatorMaxTotalMs,
-          instanceName: instance.name,
+  // Send the message/poll with optional typing indicator (custom span for tracing)
+  const toHash = hashForBreadcrumb(item.payload.chatId);
+  sentry.addBreadcrumb({
+    category: 'send',
+    message: 'send_attempt',
+    level: 'info',
+    data: { instanceId, toHash, type: item.type },
+  });
+
+  return await sentry.startSpan(
+    { op: 'whatsapp.send', name: `send_${item.type}` },
+    (span) => {
+      span.setAttribute('instance_id', instanceId);
+      span.setAttribute('to_hash', toHash);
+      span.setAttribute('type', item.type);
+      return (async () => {
+        try {
+          let sentMessage;
+
+          const shouldApplyTyping = instance.state === InstanceState.READY &&
+                                    instance.typingIndicatorEnabled &&
+                                    item.uxTyping !== false;
+
+          const sendFn = async () => {
+            if (item.type === 'message') {
+              return await instance.client.sendMessage(item.payload.chatId, item.payload.message, { sendSeen: false });
+            } else if (item.type === 'poll') {
+              const { Poll } = require('whatsapp-web.js');
+              const poll = new Poll(item.payload.caption, item.payload.options, {
+                allowMultipleAnswers: item.payload.multipleAnswers === true,
+              });
+              return await instance.client.sendMessage(item.payload.chatId, poll, { sendSeen: false });
+            }
+          };
+
+          if (shouldApplyTyping) {
+            sentMessage = await withTypingIndicator(
+              instance.client,
+              item.payload.chatId,
+              sendFn,
+              {
+                enabled: true,
+                timeoutMs: config.typingIndicatorMaxTotalMs,
+                instanceName: instance.name,
+              }
+            );
+          } else {
+            sentMessage = await sendFn();
+          }
+
+          const messageId = sentMessage?.id?._serialized || sentMessage?.id || null;
+          await idempotencyStore.markSent(item.idempotencyKey, messageId);
+          instance.recordSend();
+          instance.lastActivityAt = new Date();
+
+          span.setAttribute('outcome', 'success');
+          sentry.addBreadcrumb({
+            category: 'send',
+            message: 'send_success',
+            level: 'info',
+            data: { instanceId, toHash, type: item.type },
+          });
+
+          void markSeenAfterSend(instance.client, item.payload.chatId, `[${instanceId}]`).catch(() => {});
+
+          console.log(`[${instanceId}] ✓ Sent ${item.type} (idempotency: ${item.idempotencyKey.substring(0, 20)}..., messageId: ${messageId})`);
+          return true;
+        } catch (error) {
+          item.attemptCount++;
+          const errorMsg = error.message || String(error);
+          item.lastError = errorMsg;
+          instance.recordFailure();
+
+          span.setAttribute('outcome', 'error');
+          span.setAttribute('error_name', error.name || 'Error');
+          sentry.addBreadcrumb({
+            category: 'send',
+            message: 'send_fail',
+            level: 'error',
+            data: { instanceId, toHash, type: item.type, attempt: item.attemptCount },
+          });
+          sentry.withScope((scope) => {
+            scope.setFingerprint(['send_message', error.name || 'Error']);
+            sentry.captureException(error, { instanceId, toHash, type: item.type, attempt: item.attemptCount });
+          });
+
+          const isDisconnectError = errorMsg.includes('Session closed') ||
+                                    errorMsg.includes('disconnected') ||
+                                    errorMsg.includes('null') ||
+                                    errorMsg.includes('evaluate') ||
+                                    errorMsg.includes('Failed to launch');
+
+          if (isDisconnectError) {
+            console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
+            instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during send');
+
+            const backoffMs = Math.min(
+              config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
+              config.retryMaxBackoffMs
+            );
+            item.nextAttemptAt = now + backoffMs;
+
+            if (instance.state !== InstanceState.NEEDS_QR) {
+              Promise.resolve(ensureReady(instanceId)).catch(err => {
+                console.error(`[${instanceId}] Reconnection failed:`, err);
+              });
+            }
+
+            return false;
+          }
+
+          const backoffMs = Math.min(
+            config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
+            config.retryMaxBackoffMs
+          );
+          item.nextAttemptAt = now + backoffMs;
+
+          console.error(`[${instanceId}] ✗ Send failed (attempt ${item.attemptCount}): ${errorMsg}. Retry at ${new Date(item.nextAttemptAt).toISOString()}`);
+
+          if (item.attemptCount >= 5) {
+            await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
+          }
+
+          return false;
         }
-      );
-    } else {
-      // Send without typing indicator
-      sentMessage = await sendFn();
+      })();
     }
-    
-    // Success: mark as sent
-    const messageId = sentMessage?.id?._serialized || sentMessage?.id || null;
-    await idempotencyStore.markSent(item.idempotencyKey, messageId);
-    instance.recordSend();
-    instance.lastActivityAt = new Date();
-    
-    // Selective read receipt: mark chat as seen after bot sends (1-3s delay, natural)
-    void markSeenAfterSend(instance.client, item.payload.chatId, `[${instanceId}]`).catch(() => {});
-    
-    console.log(`[${instanceId}] ✓ Sent ${item.type} (idempotency: ${item.idempotencyKey.substring(0, 20)}..., messageId: ${messageId})`);
-    return true; // Remove from queue
-    
-  } catch (error) {
-    item.attemptCount++;
-    const errorMsg = error.message || String(error);
-    item.lastError = errorMsg;
-    instance.recordFailure();
-    
-    // Classify error
-    const isDisconnectError = errorMsg.includes('Session closed') || 
-                              errorMsg.includes('disconnected') ||
-                              errorMsg.includes('null') ||
-                              errorMsg.includes('evaluate') ||
-                              errorMsg.includes('Failed to launch');
-    
-    if (isDisconnectError) {
-      // Terminal disconnect - stop sending, trigger reconnection
-      console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
-      instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during send');
-      
-      // Calculate backoff
-      const backoffMs = Math.min(
-        config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
-        config.retryMaxBackoffMs
-      );
-      item.nextAttemptAt = now + backoffMs;
-      
-      // Trigger reconnection
-      if (instance.state !== InstanceState.NEEDS_QR) {
-        Promise.resolve(ensureReady(instanceId)).catch(err => {
-          console.error(`[${instanceId}] Reconnection failed:`, err);
-        });
-      }
-      
-      return false; // Keep in queue, will retry after reconnect
-    }
-    
-    // Other errors: retry with backoff
-    const backoffMs = Math.min(
-      config.retryBaseBackoffMs * Math.pow(2, item.attemptCount - 1),
-      config.retryMaxBackoffMs
-    );
-    item.nextAttemptAt = now + backoffMs;
-    
-    console.error(`[${instanceId}] ✗ Send failed (attempt ${item.attemptCount}): ${errorMsg}. Retry at ${new Date(item.nextAttemptAt).toISOString()}`);
-    
-    // Mark as failed in idempotency store (but keep in queue for retry)
-    if (item.attemptCount >= 5) { // After 5 attempts, mark as failed
-      await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
-    }
-    
-    return false; // Keep in queue for retry
-  }
+  );
 }
 
 /**
@@ -2097,7 +2293,7 @@ async function enqueueItem(instanceId, type, payload, idempotencyKey = null) {
   } else {
     console.log(`[${instanceId}] Instance not READY (state: ${instance.state}), will attempt to make it ready`);
     // Trigger ensureReady if not terminal/paused (safety net - sendMessage/sendPoll also do this)
-    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
+    if (instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
       Promise.resolve(ensureReady(instanceId)).catch(err => {
         console.error(`[${instanceId}] ensureReady failed in enqueueItem:`, err);
       });
@@ -2144,7 +2340,7 @@ async function sendMessage(instanceId, chatId, message, idempotencyKey = null) {
   const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
   
   // Trigger reconnection if not terminal/paused (only if newly queued)
-  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
@@ -2195,7 +2391,7 @@ async function sendPoll(instanceId, chatId, caption, options, multipleAnswers, i
   const wasAlreadyQueued = itemAge > 2000; // More than 2 seconds old = existing item
   
   // Trigger reconnection if not terminal/paused (only if newly queued)
-  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED) {
+  if (!wasAlreadyQueued && instance.state !== InstanceState.NEEDS_QR && instance.state !== InstanceState.ERROR && instance.state !== InstanceState.RESTRICTED && instance.state !== InstanceState.PAUSED && instance.state !== InstanceState.FAILED_QR_TIMEOUT) {
     Promise.resolve(ensureReady(instanceId)).catch(err => {
       console.error(`[${instanceId}] Background ensureReady failed:`, err);
     });
@@ -2713,6 +2909,21 @@ function cleanupExpiredViewTokens() {
   }
 }
 
+/**
+ * Run a single outbound action from the low-power queue (drain phase).
+ * @param {{ actionType: string; instanceId: string; payload: object }} item
+ */
+async function runOutboundAction(item) {
+  const { actionType, instanceId, payload } = item;
+  if (actionType === 'send_message') {
+    await sendMessage(instanceId, payload.formattedChatId, payload.message);
+  } else if (actionType === 'send_poll') {
+    await sendPoll(instanceId, payload.formattedChatId, payload.caption, payload.options, payload.multipleAnswers);
+  } else {
+    throw new Error(`Unknown outbound action: ${actionType}`);
+  }
+}
+
 module.exports = {
   InstanceState,
   createInstance,
@@ -2738,4 +2949,7 @@ module.exports = {
   injectViewSessionScroll,
   revokeViewSessionToken,
   cleanupExpiredViewTokens,
+  runOutboundAction,
+  deliverBufferedInbound,
+  startNeedsQrWatchdog,
 };

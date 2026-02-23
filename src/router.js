@@ -7,6 +7,10 @@ const express = require('express');
 const instanceManager = require('./instance-manager');
 const { InstanceState } = require('./instance-manager');
 const config = require('./config');
+const sentry = require('./observability/sentry');
+const systemMode = require('./systemMode');
+const outboundQueue = require('./queues/outboundQueue');
+const inboundBuffer = require('./queues/inboundBuffer');
 const { 
   formatPhoneForWhatsApp, 
   extractPhoneNumber,
@@ -31,6 +35,7 @@ function mapInstanceStateToStatus(state) {
     [InstanceState.ERROR]: 'disconnected',
     [InstanceState.RESTRICTED]: 'restricted',
     [InstanceState.PAUSED]: 'paused',
+    [InstanceState.FAILED_QR_TIMEOUT]: 'disconnected',
   };
   return stateMap[state] || 'disconnected';
 }
@@ -441,6 +446,23 @@ router.post('/instances/:id/client/action/create-poll', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid chatId format', 400));
     }
 
+    if (systemMode.getSystemMode().mode === 'syncing') {
+      const r = outboundQueue.enqueue('send_poll', instanceId, {
+        formattedChatId,
+        caption,
+        options,
+        multipleAnswers,
+      });
+      if (!r.ok) {
+        return res.status(429).json(createErrorResponse('Outbound queue full during sync', 429));
+      }
+      return res.status(202).json(createSuccessResponse({
+        queued: true,
+        reason: 'system_syncing',
+        queueDepth: outboundQueue.getCount(),
+      }));
+    }
+
     // Use instanceManager.sendPoll (handles queue automatically)
     const result = await instanceManager.sendPoll(
       instanceId,
@@ -523,11 +545,25 @@ router.post('/instances/:id/client/action/send-message', async (req, res) => {
       return res.status(400).json(createErrorResponse('Invalid chatId format', 400));
     }
 
+    if (systemMode.getSystemMode().mode === 'syncing') {
+      const r = outboundQueue.enqueue('send_message', instanceId, { formattedChatId, message });
+      if (!r.ok) {
+        return res.status(429).json(createErrorResponse('Outbound queue full during sync', 429));
+      }
+      return res.status(202).json(createSuccessResponse({
+        queued: true,
+        reason: 'system_syncing',
+        queueDepth: outboundQueue.getCount(),
+      }));
+    }
+
     // Use instanceManager.sendMessage (handles queue automatically)
-    const result = await instanceManager.sendMessage(
-      instanceId,
-      formattedChatId,
-      message
+    const result = await sentry.startSpan(
+      { op: 'http.server', name: 'POST /instances/:id/client/action/send-message' },
+      (span) => {
+        span.setAttribute('instance_id', instanceId);
+        return instanceManager.sendMessage(instanceId, formattedChatId, message);
+      }
     );
 
     // Return result with enhanced info
@@ -973,10 +1009,16 @@ router.post('/instances/:id/restart', async (req, res) => {
       return res.status(400).json(createErrorResponse('Restart type must be "soft" or "hard"', 400));
     }
 
-    // Terminal states: cannot restart
+    // Terminal states: cannot restart via ensureReady
     if (instance.state === InstanceState.NEEDS_QR) {
       return res.status(400).json(createErrorResponse(
         'Instance needs QR code scan. Cannot restart. Please scan QR code first.',
+        400
+      ));
+    }
+    if (instance.state === InstanceState.FAILED_QR_TIMEOUT) {
+      return res.status(400).json(createErrorResponse(
+        'Instance failed QR timeout. Delete and recreate or create a new instance.',
         400
       ));
     }
@@ -995,6 +1037,65 @@ router.post('/instances/:id/restart', async (req, res) => {
     
   } catch (error) {
     console.error('Error restarting instance:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+function getSystemStatusPayload() {
+  const sys = systemMode.getSystemMode();
+  const now = Date.now();
+  const instances = instanceManager.getAllInstances().map((i) => {
+    const needsQrSince = i.needsQrSince ? new Date(i.needsQrSince).getTime() : 0;
+    const lastQrAt = i.lastQrAt ? new Date(i.lastQrAt).getTime() : 0;
+    return {
+      id: i.id,
+      state: i.state,
+      needsQrSince: i.needsQrSince ? new Date(i.needsQrSince).toISOString() : null,
+      lastQrAt: i.lastQrAt ? new Date(i.lastQrAt).toISOString() : null,
+      qrRecoveryAttempts: i.qrRecoveryAttempts ?? 0,
+      lastStateChangeAt: i.lastStateChangeAt ? new Date(i.lastStateChangeAt).toISOString() : null,
+      qrAgeSeconds: lastQrAt > 0 ? Math.round((now - lastQrAt) / 1000) : null,
+      needsQrAgeSeconds: needsQrSince > 0 ? Math.round((now - needsQrSince) / 1000) : null,
+    };
+  });
+  return {
+    mode: sys.mode,
+    since: sys.since?.toISOString?.() ?? sys.since,
+    syncingInstanceId: sys.syncingInstanceId ?? null,
+    queuedOutboundCount: outboundQueue.getCount(),
+    queuedOutboundByInstance: outboundQueue.getCountByInstance?.() ?? {},
+    inboundBufferCount: inboundBuffer.getCount(),
+    instances,
+    perInstanceStates: instances,
+  };
+}
+
+/**
+ * GET /__debug/system
+ * Low-power mode visibility: system mode, queue depths, per-instance states.
+ */
+router.get('/__debug/system', (req, res) => {
+  try {
+    res.json(createSuccessResponse(getSystemStatusPayload()));
+  } catch (error) {
+    console.error('Error in /__debug/system:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
+/**
+ * GET /system/status
+ * Same as __debug/system; optional ADMIN_DEBUG_SECRET header when env set.
+ */
+router.get('/system/status', (req, res) => {
+  const secret = process.env.ADMIN_DEBUG_SECRET;
+  if (secret && req.headers['x-admin-debug-secret'] !== secret) {
+    return res.status(403).json(createErrorResponse('Forbidden', 403));
+  }
+  try {
+    res.json(createSuccessResponse(getSystemStatusPayload()));
+  } catch (error) {
+    console.error('Error in /system/status:', error);
     res.status(500).json(createErrorResponse(error.message, 500));
   }
 });

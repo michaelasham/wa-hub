@@ -83,12 +83,34 @@ LOG_LEVEL=info
 | `READY_WATCHDOG_MS` | Timeout for ready event before soft-restart (ms) | `600000` (10 min) | No |
 | `DELETE_DESTROY_TIMEOUT_MS` | Timeout for client.destroy() on delete before purge (ms) | `15000` (15s) | No |
 | `CHROME_PATH` | Path to Chromium/Chrome executable for Puppeteer | `/usr/bin/chromium-browser` | No |
+| `CHROME_DISABLE_SANDBOX` | Set to `1` to add `--no-sandbox` (e.g. some Docker setups); default off for security | `0` | No |
+| `CHROME_ARGS_EXTRA` | Extra Chromium flags (space-separated) | - | No |
+| `WAHUB_LOG_CHROME_ARGS` | Set to `1` to log full Chromium launch context (memory, versions) on each instance start | `0` | No |
 | `SESSION_DATA_PATH` | Path for storing WhatsApp session data | `./.wwebjs_auth` | No |
 | `LOG_LEVEL` | Logging level | `info` | No |
 | `TYPING_INDICATOR_ENABLED_DEFAULT` | Enable typing indicator by default for new instances | `true` | No |
 | `TYPING_INDICATOR_MIN_MS` | Minimum typing duration (milliseconds) | `600` | No |
 | `TYPING_INDICATOR_MAX_MS` | Maximum typing duration (milliseconds) | `1800` | No |
 | `TYPING_INDICATOR_MAX_TOTAL_MS` | Maximum total time for typing + send (safety limit) | `2500` | No |
+| `SENTRY_DSN` | Sentry DSN for error tracking (leave empty to disable) | - | No |
+| `SENTRY_ENVIRONMENT` | Environment name (e.g. `production`, `staging`, `dev`) | `NODE_ENV` or `production` | No |
+| `SENTRY_TRACES_SAMPLE_RATE` | Fraction of transactions to send for performance (0–1) | `0.05` | No |
+| `SENTRY_PROFILES_SAMPLE_RATE` | Fraction of profiles to send (0 = off) | `0` | No |
+| `SENTRY_RELEASE` | Release identifier (e.g. git SHA); optional | - | No |
+| `WA_HUB_INSTANCE_ID` | Stable instance identifier for Sentry (overrides GCP metadata when set) | GCP instance id or `unknown` | No |
+| `WA_HUB_INSTANCE_NAME` | Human-readable instance name for Sentry | - | No |
+
+### Sentry (error tracking)
+
+When `SENTRY_DSN` is set, wa-hub reports errors and breadcrumbs to Sentry. Every event is tagged with a **stable instance identifier** so you can filter by VM/instance (like shop domain in WASP).
+
+- **DSN**: Set `SENTRY_DSN` in `.env` to your project DSN (Sentry → Project Settings → Client Keys (DSN)). Example format: `https://KEY@o4510933991030784.ingest.us.sentry.io/PROJECT_ID`.
+- **Logs & tracing**: The SDK is initialized with `enableLogs: true` and `consoleLoggingIntegration({ levels: ['log', 'warn', 'error'] })` so `console.log`/`warn`/`error` are sent as structured logs. Custom spans are created for `POST /instances/:id/client/action/send-message` and for each WhatsApp send (`whatsapp.send`).
+- **Instance ID**: Set `WA_HUB_INSTANCE_ID` to a fixed value (e.g. hostname or GCP instance name). If unset, the app tries the GCP metadata server (`metadata.google.internal`) and caches the instance id/name; outside GCP it uses `unknown` unless you set the env var.
+- **PII / scrubbing**: Phone numbers, message bodies, tokens, cookies, QR data, and sensitive headers are **not** sent. Breadcrumbs and extras are scrubbed (phone-like patterns replaced, sensitive keys removed).
+- **Breadcrumbs**: Process boot, WhatsApp client init, `qr_generated`, `authenticated`, `ready`, `auth_failure`, `disconnected`, browser restart, and send attempt/success/fail (with hashed chat id only).
+- **How to verify**: In Sentry, open an issue or event and check the **Tags** panel for `gcp_instance_id` (and optionally `gcp_instance_name`). Use these to filter by instance in the Discover/Issues views.
+- **Dev test**: With `SENTRY_DSN` set and `NODE_ENV` not `production`, run `npm run test-sentry` (with the server already running) or `curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:3000/internal/test-sentry` to trigger a test ReferenceError in Sentry. The route returns 404 in production.
 
 ### Authentication
 
@@ -105,6 +127,20 @@ All API endpoints (except `/health`) require authentication using an API key. In
    ```
 
 The API key is configured via the `API_KEY` environment variable. If not set, authentication is disabled (development mode only).
+
+### Chromium stability for multi-session WhatsApp
+
+Login/sync can spike memory and trigger OOM or Chromium crashes on small VMs. Use these to keep instances stable:
+
+- **Chromium flags**: wa-hub applies hardened launch args by default (`--disable-dev-shm-usage`, `--disable-gpu`, `--no-zygote`, etc.). Do not add `--no-sandbox` unless needed (e.g. Docker); set `CHROME_DISABLE_SANDBOX=1`.
+- **Shared memory (/dev/shm)**: We always pass `--disable-dev-shm-usage` as a fallback. If you run in **Docker**, increase shared memory: `docker run --shm-size=1g ...` or in compose add `shm_size: "1gb"`. Otherwise Chromium may crash during QR/auth.
+- **Swap on GCP VM (e2-medium 4GB)**: Add swap so the system doesn’t OOM during spikes:
+  ```bash
+  sudo ./scripts/ops/add-swap.sh 4G
+  ```
+- **Verify after a crash**: Run `./scripts/ops/check-oom.sh` to see OOM/killed process messages and current memory/swap; run `./scripts/ops/check-shm.sh` to see `/dev/shm` size and recommendations.
+
+See [scripts/ops/README.md](scripts/ops/README.md) for full ops script usage.
 
 ## Running Locally
 
