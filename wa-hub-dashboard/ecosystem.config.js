@@ -11,7 +11,7 @@ module.exports = {
       name: 'wa-hub-dashboard',
       script: 'npm',
       args: 'run start',
-      cwd: '/home/michaelnasser321/wa-hub/wa-hub-dashboard',
+      cwd: __dirname,
       env: {
         PORT: 3001,
         HOSTNAME: '0.0.0.0',
@@ -23,6 +23,7 @@ module.exports = {
         DASHBOARD_SESSION_SECRET: trim(process.env.DASHBOARD_SESSION_SECRET),
         DASHBOARD_SECURE_COOKIES: trim(process.env.DASHBOARD_SECURE_COOKIES),
         WA_HUB_WEBHOOK_SIGNATURE_SECRET: trim(process.env.WA_HUB_WEBHOOK_SIGNATURE_SECRET),
+        ADMIN_DEBUG_SECRET: trim(process.env.ADMIN_DEBUG_SECRET),
       },
     },
   ],
