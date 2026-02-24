@@ -779,7 +779,7 @@ async function recoverNeedsQrInstance(instanceId) {
       });
       require('./utils/syncLiteInterception').enableSyncLiteInterception(client, instanceId);
     } else {
-      // Nuclear: logout (best-effort), destroy, purge auth, recreate + initialize
+      // Nuclear: logout (best-effort), destroy, recreate + initialize (auth files are never deleted)
       instance.clearReadyWatchdog();
       instance.clearReadyPoll();
       instance.clearMessageFallbackPoller();
@@ -794,12 +794,11 @@ async function recoverNeedsQrInstance(instanceId) {
         instance.client = null;
         instance.debugWsEndpoint = null;
       }
-      await purgeLocalAuthSession(instanceId);
       const client = await createClient(instanceId, instance.name);
       instance.client = client;
       setupEventListeners(instanceId, client);
       startPopupDismisser(client, `[${instanceId}]`);
-      instance.transitionTo(InstanceState.CONNECTING, 'QR recovery nuclear (auth purged)');
+      instance.transitionTo(InstanceState.CONNECTING, 'QR recovery nuclear (client recreated)');
       instance.startConnectingWatchdog();
       await client.initialize().catch((err) => {
         console.error(`[${instanceId}] QR recovery nuclear initialize error:`, err.message);
@@ -1330,14 +1329,12 @@ function setupEventListeners(instanceId, client) {
       if (processed > 0) inst.fallbackPollLastError = null;
     } catch (err) {
       inst.fallbackPollLastError = err.message;
+      // Do not transition to DISCONNECTED from fallback poll: getChats() can throw ProtocolError
+      // during WhatsApp internal navigation (e.g. OPENING). Rely on client 'disconnected' event
+      // and send-path disconnect handling to avoid reconnect loops.
       const msg = err && (err.message || String(err)) || '';
-      const isContextDestroyed = msg.includes('Execution context was destroyed') || msg.includes('Protocol error') || err.name === 'ProtocolError' || msg.includes('getChat');
-      if (isContextDestroyed) {
+      if (err.name === 'ProtocolError' || msg.includes('Execution context was destroyed')) {
         inst.clearMessageFallbackPoller();
-        if (inst.state === InstanceState.READY) {
-          inst.transitionTo(InstanceState.DISCONNECTED, 'Context destroyed during fallback poll');
-          Promise.resolve(ensureReady(instanceId)).catch(e => console.error(`[${instanceId}] Reconnection failed:`, e?.message));
-        }
       }
     }
   }
@@ -1924,6 +1921,9 @@ async function processQueueItem(instanceId, item) {
             sentry.captureException(error, { instanceId, toHash, type: item.type, attempt: item.attemptCount });
           });
 
+          // Only treat as full disconnect when connection/context is clearly dead (triggers ensureReady/restart).
+          // Do NOT include getChat/Store undefined: those can be transient during page refresh; treating them
+          // as disconnect causes unnecessary restarts and can make WhatsApp show QR again even though session files are intact.
           const isDisconnectError = errorMsg.includes('Session closed') ||
                                     errorMsg.includes('disconnected') ||
                                     errorMsg.includes('null') ||
@@ -1931,9 +1931,7 @@ async function processQueueItem(instanceId, item) {
                                     errorMsg.includes('Execution context was destroyed') ||
                                     errorMsg.includes('Protocol error') ||
                                     (error.name === 'ProtocolError') ||
-                                    errorMsg.includes('Failed to launch') ||
-                                    errorMsg.includes('getChat') ||
-                                    errorMsg.includes('Cannot read properties of undefined');
+                                    errorMsg.includes('Failed to launch');
 
           if (isDisconnectError) {
             console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
@@ -2198,15 +2196,9 @@ async function createInstance(instanceId, name, webhookConfig) {
           msg.includes('Execution context was destroyed') &&
           (msg.includes('because of a navigation') || msg.includes('post_logout'));
         if (isSessionLoggedOut) {
-          console.warn(`[${instanceId}] Session logged out (post_logout/navigation). Purging session and re-queuing for fresh QR.`);
-          try {
-            await purgeLocalAuthSession(instanceId);
-          } catch (purgeErr) {
-            console.warn(`[${instanceId}] Purge session failed:`, purgeErr.message);
-          }
-          instances.delete(instanceId);
-          systemMode.recomputeFromInstances(() => getAllInstances());
-          throw new Error(`Session logged out; purged session. Retry will show QR. Original: ${error.message}`);
+          console.warn(`[${instanceId}] Session logged out (post_logout/navigation). Auth files are not deleted; instance left in ERROR. Re-scan QR via dashboard or delete instance to re-link.`);
+          instance.transitionTo(InstanceState.ERROR, launchErrorMsg);
+          throw new Error(`Session logged out. Original: ${error.message}`);
         }
         instance.transitionTo(InstanceState.ERROR, launchErrorMsg);
         throw new Error(`Failed to initialize after ${maxAttempts} attempts: ${error.message}`);
@@ -2642,10 +2634,9 @@ async function deleteInstance(instanceId) {
     }
   }
 
-  const purgeResult = await purgeLocalAuthSession(instanceId);
-  result.purged = purgeResult.purged;
-  result.purgedPaths = purgeResult.purgedPaths;
-  result.warnings.push(...purgeResult.warnings);
+  // Auth files are never deleted: instance is removed from app but session dir is left on disk.
+  result.purged = false;
+  result.purgedPaths = [];
 
   console.log(`[${instanceId}] DELETE_INSTANCE end`, {
     deleted: result.deleted,
