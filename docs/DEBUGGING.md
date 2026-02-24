@@ -49,7 +49,7 @@ npm start
 
 # In another terminal, run the test script
 # (Edit BASE_URL and add API key header if needed)
-./test-api.sh
+./scripts/test-api.sh
 ```
 
 Or manually:

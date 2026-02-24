@@ -200,7 +200,7 @@ npm start
 
 Or use the test script to start both:
 ```bash
-./start-test.sh
+./scripts/start-test.sh
 ```
 
 See [TESTING.md](./TESTING.md) for detailed testing instructions.
@@ -819,6 +819,8 @@ wa-hub/
 │   ├── utils/
 │   │   └── typingIndicator.js # Typing indicator utility
 │   └── idempotency-store.js  # Idempotency persistence
+├── docs/                     # Documentation (setup, API, deployment, etc.)
+├── scripts/                  # Ops and test scripts (deploy, cleanup, test-webhook, etc.)
 ├── ecosystem.config.js       # PM2 configuration
 ├── .env                      # Environment variables (create this)
 ├── .wwebjs_auth/             # WhatsApp session data (auto-created)
@@ -854,5 +856,5 @@ ISC
 
 ## Support
 
-For issues and questions, please check the expectations.md file for API specifications and behavior details.
+For issues and questions, please check the docs/ folder (e.g. docs/expectations.md) for API specifications and behavior details.
 

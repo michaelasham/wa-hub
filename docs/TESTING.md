@@ -10,7 +10,7 @@ This guide explains how to test the wa-hub service locally with the fake webhook
 ```bash
 npm run test-webhook
 # or
-node test-webhook-server.js
+node scripts/test-webhook-server.js
 ```
 
 **Terminal 2 - Start wa-hub service:**
@@ -23,7 +23,7 @@ node src/index.js
 ### Option 2: Using the Test Script (One Terminal)
 
 ```bash
-./start-test.sh
+./scripts/start-test.sh
 ```
 
 Press `Ctrl+C` to stop both services.

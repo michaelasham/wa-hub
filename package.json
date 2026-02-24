@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js",
-    "test-webhook": "node test-webhook-server.js",
+    "test-webhook": "node scripts/test-webhook-server.js",
     "test-sentry": "node scripts/test-sentry.js",
     "launchpad:start": "node scripts/start-launchpad.js",
     "launchpad:stop": "node scripts/stop-launchpad.js",

@@ -6,7 +6,7 @@ echo ""
 
 # Start webhook server in background
 echo "🚀 Starting webhook server on port 3001..."
-node test-webhook-server.js &
+node scripts/test-webhook-server.js &
 WEBHOOK_PID=$!
 
 # Wait a moment for webhook server to start

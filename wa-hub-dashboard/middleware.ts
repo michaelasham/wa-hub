@@ -4,7 +4,7 @@ import { isAuthEnabled } from './lib/auth-edge';
 
 const COOKIE_NAME = 'wa-hub-dashboard-session';
 
-const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/check', '/api/wahub/webhook'];
+const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/check', '/api/wahub/webhook', '/api/ping'];
 
 function isPublicPath(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
