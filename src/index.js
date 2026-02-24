@@ -110,6 +110,15 @@ async function main() {
   });
 
   process.on('unhandledRejection', (reason, promise) => {
+    const msg = reason?.message ?? String(reason);
+    const isProtocolContextDestroyed =
+      (reason?.name === 'ProtocolError') ||
+      (typeof msg === 'string' && msg.includes('Execution context was destroyed'));
+    if (isProtocolContextDestroyed) {
+      // Puppeteer/Chromium: page or context was destroyed (e.g. client disconnected). Log and avoid Sentry noise.
+      console.warn('Unhandled rejection (browser context destroyed):', msg);
+      return;
+    }
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
     sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)), {
       unhandledRejection: true,

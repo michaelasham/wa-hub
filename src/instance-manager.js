@@ -1914,6 +1914,9 @@ async function processQueueItem(instanceId, item) {
                                     errorMsg.includes('disconnected') ||
                                     errorMsg.includes('null') ||
                                     errorMsg.includes('evaluate') ||
+                                    errorMsg.includes('Execution context was destroyed') ||
+                                    errorMsg.includes('Protocol error') ||
+                                    (error.name === 'ProtocolError') ||
                                     errorMsg.includes('Failed to launch');
 
           if (isDisconnectError) {
@@ -2171,6 +2174,23 @@ async function createInstance(instanceId, name, webhookConfig) {
       }
 
       if (attempt === maxAttempts) {
+        // Session logged out (WhatsApp redirected to post_logout) → purge session and allow retry to get fresh QR
+        const msg = (error && (error.message || String(error))) || '';
+        const isSessionLoggedOut =
+          msg.includes('Execution context was destroyed') &&
+          (msg.includes('because of a navigation') || msg.includes('post_logout'));
+        const launchMsgIncludesLogout = (launchErrorMsg || '').includes('post_logout');
+        if (isSessionLoggedOut || launchMsgIncludesLogout) {
+          console.warn(`[${instanceId}] Session logged out (post_logout/navigation). Purging session and re-queuing for fresh QR.`);
+          try {
+            await purgeLocalAuthSession(instanceId);
+          } catch (purgeErr) {
+            console.warn(`[${instanceId}] Purge session failed:`, purgeErr.message);
+          }
+          instances.delete(instanceId);
+          systemMode.recomputeFromInstances(() => getAllInstances());
+          throw new Error(`Session logged out; purged session. Retry will show QR. Original: ${error.message}`);
+        }
         instance.transitionTo(InstanceState.ERROR, launchErrorMsg);
         throw new Error(`Failed to initialize after ${maxAttempts} attempts: ${error.message}`);
       }
@@ -2689,6 +2709,38 @@ async function saveInstancesToDisk() {
 }
 
 /**
+ * Tear down an existing instance so the restore scheduler can run createInstance again (retry).
+ * Used when a previous createInstance failed and left the instance in the map; without this,
+ * retries would hit "Instance already exists" and never re-run init.
+ * Does not purge session or update the persisted instances file.
+ */
+async function teardownInstanceForRestoreRetry(instanceId) {
+  const instance = instances.get(instanceId);
+  if (!instance) return;
+  instance.clearReadyWatchdog();
+  instance.clearReadyPoll();
+  instance.clearMessageFallbackPoller();
+  instance.clearConnectingWatchdog();
+  instance.clearHealthCheck();
+  instance.clearDisconnectCooldownTimer();
+  instance.clearRateLimitWakeTimer();
+  stopSendLoop(instanceId);
+  const client = instance.client;
+  if (client) {
+    try {
+      if (client.pupPage) client.pupPage.removeAllListeners();
+      if (client.pupBrowser) await client.pupBrowser.close().catch(() => {});
+    } catch (err) {
+      console.warn(`[${instanceId}] Teardown for retry: close browser warning:`, err.message);
+    }
+    instance.client = null;
+  }
+  instances.delete(instanceId);
+  systemMode.recomputeFromInstances(() => getAllInstances());
+  console.log(`[${instanceId}] Teardown for restore retry (instance removed from map)`);
+}
+
+/**
  * Create a stub instance in ERROR state (e.g. after RESTORE_MAX_ATTEMPTS). No browser launch.
  */
 function createInstanceStub(instanceId, name, webhookConfig, errorMessage) {
@@ -2740,6 +2792,10 @@ async function loadInstancesFromDisk() {
         const r = await retryInstance(item.instanceId);
         if (!r.ok) throw new Error(r.error || 'Retry failed');
         return;
+      }
+      // If a previous attempt left this instance in the map (e.g. init failed), tear it down so we can run createInstance fresh
+      if (instances.has(item.id)) {
+        await teardownInstanceForRestoreRetry(item.id);
       }
       await createInstance(item.id, item.name, {
         url: item.webhookUrl,
