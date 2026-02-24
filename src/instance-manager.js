@@ -2174,13 +2174,14 @@ async function createInstance(instanceId, name, webhookConfig) {
       }
 
       if (attempt === maxAttempts) {
-        // Session logged out (WhatsApp redirected to post_logout) → purge session and allow retry to get fresh QR
+        // Session logged out (WhatsApp redirected to post_logout) → purge session and allow retry to get fresh QR.
+        // Only use the actual error.message (not the Chromium log tail in launchErrorMsg) so we don't purge based on
+        // stale log file content that might mention post_logout from a previous run.
         const msg = (error && (error.message || String(error))) || '';
         const isSessionLoggedOut =
           msg.includes('Execution context was destroyed') &&
           (msg.includes('because of a navigation') || msg.includes('post_logout'));
-        const launchMsgIncludesLogout = (launchErrorMsg || '').includes('post_logout');
-        if (isSessionLoggedOut || launchMsgIncludesLogout) {
+        if (isSessionLoggedOut) {
           console.warn(`[${instanceId}] Session logged out (post_logout/navigation). Purging session and re-queuing for fresh QR.`);
           try {
             await purgeLocalAuthSession(instanceId);
