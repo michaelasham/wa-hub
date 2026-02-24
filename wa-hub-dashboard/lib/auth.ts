@@ -62,9 +62,8 @@ export async function validateSession(): Promise<boolean> {
 }
 
 function getCookieOptions(): { httpOnly: boolean; secure: boolean; sameSite: 'lax'; maxAge: number; path: string } {
-  const secure =
-    process.env.DASHBOARD_SECURE_COOKIES === 'true' ||
-    (process.env.DASHBOARD_SECURE_COOKIES !== 'false' && process.env.NODE_ENV === 'production');
+  // Only use secure cookies when explicitly requested (e.g. behind HTTPS). Default: false so HTTP works.
+  const secure = process.env.DASHBOARD_SECURE_COOKIES === 'true';
   return {
     httpOnly: true,
     secure,
