@@ -1177,6 +1177,11 @@ function setupEventListeners(instanceId, client) {
   // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
   client.on('qr', (qr) => {
     if (guard()) return;
+    // Ignore spurious QR when already READY (WhatsApp Web can emit QR briefly during refresh/reconnect)
+    if (instance.state === InstanceState.READY) {
+      console.log(`[${instanceId}] Event: qr (ignored, already READY)`);
+      return;
+    }
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'qr';
     instance.lastLifecycleEventAt = new Date();
@@ -1325,6 +1330,15 @@ function setupEventListeners(instanceId, client) {
       if (processed > 0) inst.fallbackPollLastError = null;
     } catch (err) {
       inst.fallbackPollLastError = err.message;
+      const msg = err && (err.message || String(err)) || '';
+      const isContextDestroyed = msg.includes('Execution context was destroyed') || msg.includes('Protocol error') || err.name === 'ProtocolError' || msg.includes('getChat');
+      if (isContextDestroyed) {
+        inst.clearMessageFallbackPoller();
+        if (inst.state === InstanceState.READY) {
+          inst.transitionTo(InstanceState.DISCONNECTED, 'Context destroyed during fallback poll');
+          Promise.resolve(ensureReady(instanceId)).catch(e => console.error(`[${instanceId}] Reconnection failed:`, e?.message));
+        }
+      }
     }
   }
 
@@ -1917,7 +1931,9 @@ async function processQueueItem(instanceId, item) {
                                     errorMsg.includes('Execution context was destroyed') ||
                                     errorMsg.includes('Protocol error') ||
                                     (error.name === 'ProtocolError') ||
-                                    errorMsg.includes('Failed to launch');
+                                    errorMsg.includes('Failed to launch') ||
+                                    errorMsg.includes('getChat') ||
+                                    errorMsg.includes('Cannot read properties of undefined');
 
           if (isDisconnectError) {
             console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
