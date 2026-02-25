@@ -178,11 +178,19 @@ See **[docs/LAUNCHPAD.md](docs/LAUNCHPAD.md)** for architecture, env var table, 
 
 ### Development Mode
 
+For full local dev (backend + dashboard with hot reload, env setup, and Cloudflare Tunnel for QR scanning), see **[README.dev.md](README.dev.md)**.
+
 ```bash
+# Production-style single process
 npm start
 ```
 
 The service will start on `http://localhost:3000` (or the port specified in `PORT`).
+
+```bash
+# Development: backend (nodemon) + dashboard (Next.js) with hot reload
+npm run dev
+```
 
 ### Testing Locally
 

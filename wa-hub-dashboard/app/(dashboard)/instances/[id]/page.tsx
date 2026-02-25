@@ -68,6 +68,27 @@ export default function InstanceDetailPage() {
     }
   };
 
+  const [clearingQueue, setClearingQueue] = useState(false);
+  const handleClearQueue = async () => {
+    if (!confirm('Clear all queued messages/polls for this instance?')) return;
+    setClearingQueue(true);
+    try {
+      const res = await waHubRequest<{ cleared?: number; queueDepth?: number }>({
+        method: 'DELETE',
+        path: `/instances/${id}/queue`,
+      });
+      if (res.ok && res.data) {
+        const d = res.data as { cleared?: number; queueDepth?: number };
+        alert(`Queue cleared. ${d.cleared ?? 0} item(s) removed.`);
+        handleRefresh();
+      } else {
+        alert(res.error ?? 'Failed to clear queue');
+      }
+    } finally {
+      setClearingQueue(false);
+    }
+  };
+
   const handleViewLiveSession = async (interactive = false) => {
     try {
       const res = await fetch('/api/view-session/create', {
@@ -155,6 +176,11 @@ export default function InstanceDetailPage() {
           onAction: handleDelete,
         }}
         secondaryActions={[
+          {
+            content: 'Clear Queue',
+            onAction: handleClearQueue,
+            loading: clearingQueue,
+          },
           {
             content: 'View Live Session',
             onAction: () => handleViewLiveSession(false),

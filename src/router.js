@@ -667,7 +667,8 @@ router.get('/instances/:id/queue', (req, res) => {
 
 /**
  * DELETE /instances/:id/queue
- * Clear message/poll queue for an instance
+ * Clear message/poll queue for an instance and remove its items from the global outbound queue
+ * (so the queue does not refill when system drains the outbound queue).
  */
 router.delete('/instances/:id/queue', (req, res) => {
   try {
@@ -678,11 +679,16 @@ router.delete('/instances/:id/queue', (req, res) => {
     }
 
     const result = instanceManager.clearQueue(instanceId);
+    const droppedFromOutbound = outboundQueue.dropByInstance(instanceId);
+    if (droppedFromOutbound > 0) {
+      console.log(`[${instanceId}] Cleared queue: also removed ${droppedFromOutbound} item(s) from global outbound queue`);
+    }
     
     res.json(createSuccessResponse({
       message: `Queue cleared for instance ${instanceId}`,
       cleared: result.cleared,
       queueDepth: result.queueDepth,
+      droppedFromOutbound,
     }));
   } catch (error) {
     console.error('Error clearing queue:', error);

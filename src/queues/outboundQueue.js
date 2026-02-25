@@ -45,6 +45,17 @@ function dropExpired() {
   return dropped;
 }
 
+/** Remove all queued items for an instance (so they are not re-enqueued when drain runs). */
+function dropByInstance(instanceId) {
+  const before = queue.length;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].instanceId === instanceId) {
+      queue.splice(i, 1);
+    }
+  }
+  return before - queue.length;
+}
+
 /**
  * Drain queue sequentially with delay between items.
  * @param { (item: object) => Promise<any> } executor - runs one action
@@ -77,6 +88,7 @@ module.exports = {
   getCountByInstance,
   getQueue,
   dropExpired,
+  dropByInstance,
   drain,
   MAX,
   TTL_MS,

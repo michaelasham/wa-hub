@@ -779,7 +779,8 @@ async function recoverNeedsQrInstance(instanceId) {
       });
       require('./utils/syncLiteInterception').enableSyncLiteInterception(client, instanceId);
     } else {
-      // Nuclear: logout (best-effort), destroy, recreate + initialize (auth files are never deleted)
+      // Nuclear: destroy client and recreate with same LocalAuth path. No purge: auth files are never deleted
+      // (purgeLocalAuthSession is for future manual admin action only). Same path allows re-scan QR on same instance.
       instance.clearReadyWatchdog();
       instance.clearReadyPoll();
       instance.clearMessageFallbackPoller();
@@ -1173,19 +1174,25 @@ function setupEventListeners(instanceId, client) {
 
   const guard = () => !instances.has(instanceId);
 
-  // QR code event - state transition FIRST, webhook fire-and-forget (never block lifecycle)
+  // QR code event. Never transition to NEEDS_QR when already READY or when CONNECTING+authenticated
+  // (spurious qr during reconnect/refresh would otherwise cause READY → NEEDS_QR → AUTHENTICATED → READY loop).
   client.on('qr', (qr) => {
     if (guard()) return;
-    // Ignore spurious QR when already READY (WhatsApp Web can emit QR briefly during refresh/reconnect)
+    const ts = new Date().toISOString();
+    debugLog(instanceId, 'qr', { currentState: instance.state, authenticatedAt: instance.authenticatedAt ? 1 : 0 });
+    // Required: if already READY, do NOT transition to NEEDS_QR; log and return so instance stays stable.
     if (instance.state === InstanceState.READY) {
-      console.log(`[${instanceId}] Event: qr (ignored, already READY)`);
+      console.log(`[${ts}] [${instanceId}] Event: qr (ignored, already READY)`);
       return;
     }
-    const ts = new Date().toISOString();
+    // Ignore spurious qr when CONNECTING and already authenticated (waiting for ready). Prevents sync loop.
+    if (instance.state === InstanceState.CONNECTING && instance.authenticatedAt) {
+      console.log(`[${ts}] [${instanceId}] Event: qr (ignored, already authenticated, waiting for ready)`);
+      return;
+    }
     instance.lastLifecycleEvent = 'qr';
     instance.lastLifecycleEventAt = new Date();
-    debugLog(instanceId, 'qr', {});
-    console.log(`[${ts}] [${instanceId}] Event: qr`);
+    console.log(`[${ts}] [${instanceId}] Event: qr (current state=${instance.state})`);
     sentry.addBreadcrumb({ category: 'whatsapp', message: 'qr_generated', level: 'info', data: { instanceId } });
     instance.qrReceivedDuringRestart = true;
     instance.readyWatchdogRestarted = false;
@@ -1210,13 +1217,41 @@ function setupEventListeners(instanceId, client) {
   });
   
   /**
-   * Mark instance as ready. Idempotent: if already READY or readyInProgress, returns without side effects.
+   * Mark instance as ready. Idempotent and defensive: if already READY, refresh timers and return.
+   * After ready, fallback poller and send loop are started once (transitionTo + this function).
    * @param {string} source - 'event' | 'poll'
    */
-  function markReady(source) {
-    if (instance.state === InstanceState.READY || instance.readyInProgress) return;
+  async function markReady(source) {
+    // Idempotent: if already READY, only refresh activity timers and return (no duplicate startSendLoop/fallback).
+    if (instance.state === InstanceState.READY) {
+      instance.lastReadyAt = new Date();
+      instance.lastActivityAt = new Date();
+      return;
+    }
+    if (instance.readyInProgress) return;
     instance.readyInProgress = true;
     try {
+      // 800ms delay before marking ready so navigation/context is stable (reduces flip-flop during sync).
+      if (source === 'event') {
+        await new Promise((r) => setTimeout(r, 800));
+        if (guard() || instance.state === InstanceState.READY) return;
+      }
+      // Context check: ensure client.info and getState are available before marking READY
+      try {
+        const info = client.info;
+        if (!info) {
+          debugLog(instanceId, 'markReady_skip', { reason: 'client.info missing', source });
+          return;
+        }
+        const state = await client.getState();
+        if (!state || typeof state !== 'string' || state.length === 0) {
+          debugLog(instanceId, 'markReady_skip', { reason: 'getState empty', source });
+          return;
+        }
+      } catch (contextErr) {
+        debugLog(instanceId, 'markReady_skip', { reason: contextErr.message, source });
+        return;
+      }
       instance.clearReadyWatchdog();
       instance.clearReadyPoll();
       instance.readySource = source;
@@ -1284,7 +1319,7 @@ function setupEventListeners(instanceId, client) {
       instance.lastReadyPollError = null;
       console.log(`[${new Date().toISOString()}] [${instanceId}] Ready poll: client.info + getState ok, treating as ready`);
       instance.clearReadyPoll();
-      markReady('poll');
+      await markReady('poll');
     } catch (e) {
       instance.lastReadyPollError = e.message;
     }
@@ -1329,12 +1364,24 @@ function setupEventListeners(instanceId, client) {
       if (processed > 0) inst.fallbackPollLastError = null;
     } catch (err) {
       inst.fallbackPollLastError = err.message;
-      // Do not transition to DISCONNECTED from fallback poll: getChats() can throw ProtocolError
-      // during WhatsApp internal navigation (e.g. OPENING). Rely on client 'disconnected' event
-      // and send-path disconnect handling to avoid reconnect loops.
       const msg = err && (err.message || String(err)) || '';
-      if (err.name === 'ProtocolError' || msg.includes('Execution context was destroyed')) {
+      // Treat as disconnect: getChat, Cannot read properties of undefined, Execution context destroyed, Protocol error.
+      const isContextDead =
+        msg.includes('getChat') ||
+        msg.includes('Cannot read properties of undefined') ||
+        msg.includes('Execution context was destroyed') ||
+        msg.includes('Protocol error') ||
+        err.name === 'ProtocolError';
+      if (isContextDead) {
+        console.log(`[${instanceId}] Fallback poll: context dead (${msg.slice(0, 80)}), transitioning to DISCONNECTED`);
         inst.clearMessageFallbackPoller();
+        inst.transitionTo(InstanceState.DISCONNECTED, `Fallback poll: ${msg.slice(0, 100)}`);
+        stopSendLoop(instanceId);
+        if (inst.state !== InstanceState.NEEDS_QR) {
+          Promise.resolve(ensureReady(instanceId)).catch((e) =>
+            console.error(`[${instanceId}] ensureReady after fallback poll failed:`, e?.message)
+          );
+        }
       }
     }
   }
@@ -1349,7 +1396,7 @@ function setupEventListeners(instanceId, client) {
     }, intervalMs);
   }
 
-  // Authenticated event - transition from NEEDS_QR to CONNECTING (syncing) until ready
+  // Authenticated event. Only transition to CONNECTING when current state is NEEDS_QR; then 800ms delay + ready poll.
   client.on('authenticated', () => {
     if (guard()) return;
     sentry.addBreadcrumb({ category: 'whatsapp', message: 'authenticated', level: 'info', data: { instanceId } });
@@ -1362,16 +1409,21 @@ function setupEventListeners(instanceId, client) {
     instance.authenticatedToReadyMs = null;
     instance.readyPollAttempts = 0;
     instance.lastReadyPollError = null;
-    debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString() });
-    console.log(`[${ts}] [${instanceId}] Event: authenticated`);
+    debugLog(instanceId, 'authenticated', { authenticatedAt: instance.authenticatedAt.toISOString(), currentState: instance.state });
+    console.log(`[${ts}] [${instanceId}] Event: authenticated (current state=${instance.state})`);
     instance.lastEvent = 'authenticated';
+    // Only transition to CONNECTING if current state is NEEDS_QR (do not overwrite READY or other states).
     if (instance.state === InstanceState.NEEDS_QR) {
       instance.transitionTo(InstanceState.CONNECTING, 'authenticated, syncing');
     }
     instance.clearConnectingWatchdog();
     instance.connectingWatchdogRestartCount = 0; // Progress: authenticated
     instance.startReadyWatchdog();
-    startReadyPoll(); // Runs immediate check + interval
+    // 800ms delay before first ready poll so page/context is stable (context stability before marking ready).
+    setTimeout(() => {
+      if (guard()) return;
+      startReadyPoll();
+    }, 800);
     void forwardWebhook(instanceId, 'authenticated', {}).catch(err => recordWebhookError(instanceId, err));
   });
   
@@ -1379,7 +1431,9 @@ function setupEventListeners(instanceId, client) {
   client.on('ready', () => {
     if (guard()) return;
     sentry.addBreadcrumb({ category: 'whatsapp', message: 'ready', level: 'info', data: { instanceId } });
-    markReady('event');
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] [${instanceId}] Event: ready (current state=${instance.state})`);
+    void markReady('event');
   });
   
   // Auth failure - state transition FIRST, webhook fire-and-forget
@@ -1390,8 +1444,8 @@ function setupEventListeners(instanceId, client) {
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = 'auth_failure';
     instance.lastLifecycleEventAt = new Date();
-    debugLog(instanceId, 'auth_failure', { error: String(msg) });
-    console.error(`[${ts}] [${instanceId}] Event: auth_failure - ${msg}`);
+    debugLog(instanceId, 'auth_failure', { error: String(msg), currentState: instance.state });
+    console.error(`[${ts}] [${instanceId}] Event: auth_failure - ${msg} (current state=${instance.state})`);
     instance.lastAuthFailureAt = new Date();
     instance.lastError = String(msg);
     instance.lastErrorAt = new Date();
@@ -1411,8 +1465,8 @@ function setupEventListeners(instanceId, client) {
     sentry.captureMessage('WhatsApp disconnected', 'warning', { instanceId, reason: reasonStr.slice(0, 200) });
     instance.lastLifecycleEvent = 'disconnected';
     instance.lastLifecycleEventAt = new Date();
-    debugLog(instanceId, 'disconnected', { reason: reasonStr });
-    console.log(`[${instanceId}] Event: disconnected - ${reasonStr}`);
+    debugLog(instanceId, 'disconnected', { reason: reasonStr, currentState: instance.state });
+    console.log(`[${instanceId}] Event: disconnected - ${reasonStr} (current state=${instance.state})`);
     instance.lastDisconnectAt = new Date();
     instance.lastDisconnectReason = reasonStr;
     instance.lastEvent = 'disconnected';
@@ -1439,15 +1493,20 @@ function setupEventListeners(instanceId, client) {
       return;
     }
 
-    const terminalReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT', 'TIMEOUT'];
+    // Real logout: if post_logout / LOGOUT / UNPAIRED / CONFLICT, set state = ERROR only. Never purge auth files,
+    // never remove from map. User can use "Re-scan QR" or restart on same instance (reuses existing session dir).
+    const logoutReasons = ['LOGOUT', 'UNPAIRED', 'CONFLICT'];
     const reasonUpper = reasonStr.toUpperCase();
-    const isTerminal = terminalReasons.some(term => reasonUpper.includes(term));
-
-    if (isTerminal) {
-      instance.transitionTo(InstanceState.NEEDS_QR, `Terminal disconnect: ${reasonStr}`);
+    const isRealLogout = logoutReasons.some(term => reasonUpper.includes(term));
+    if (isRealLogout) {
+      instance.lastError = `Real logout/disconnect: ${reasonStr}`;
+      instance.lastErrorAt = new Date();
+      instance.transitionTo(InstanceState.ERROR, `Real logout/disconnect: ${reasonStr}`);
+      console.log(`[${instanceId}] Event: disconnected → ERROR (real logout, auth files kept)`);
       void forwardWebhook(instanceId, 'disconnected', { reason: reasonStr }).catch(err => recordWebhookError(instanceId, err));
       return;
     }
+    // TIMEOUT: treat as transient disconnect, allow reconnect below
 
     // 2. Non-terminal: aggressive cooldown - pause ALL sends + delay reconnect
     if (config.disableAutoReconnect) {
@@ -1497,7 +1556,8 @@ function setupEventListeners(instanceId, client) {
     const ts = new Date().toISOString();
     instance.lastLifecycleEvent = `change_state:${state}`;
     instance.lastLifecycleEventAt = new Date();
-    console.log(`[${ts}] [${instanceId}] Event: change_state - ${state}`);
+    debugLog(instanceId, 'change_state', { state, ourState: instance.state });
+    console.log(`[${ts}] [${instanceId}] Event: change_state - ${state} (our state=${instance.state})`);
     instance.lastEvent = `change_state:${state}`;
     void forwardWebhook(instanceId, 'change_state', { status: state }).catch(err => recordWebhookError(instanceId, err));
   });
@@ -1543,35 +1603,30 @@ function setupEventListeners(instanceId, client) {
 }
 
 /**
- * Wait for instance to become ready (event-driven, not polling)
+ * Wait for instance to become ready (event-driven, not polling).
+ * Timeout is intentionally long (config.readyTimeoutMs) to tolerate brief internal navigations during sync.
  */
 function waitForReadyEvent(instanceId, timeoutMs = config.readyTimeoutMs) {
   const instance = instances.get(instanceId);
   if (!instance) {
     return Promise.reject(new Error(`Instance ${instanceId} not found`));
   }
-  
-  // If already ready, return immediately
+  // If already ready, return immediately (no wait).
   if (instance.state === InstanceState.READY) {
     return Promise.resolve();
   }
-  
-  // If terminal state, reject immediately
+  // Terminal states: reject so caller does not wait indefinitely.
   if (instance.state === InstanceState.NEEDS_QR || instance.state === InstanceState.ERROR || instance.state === InstanceState.RESTRICTED || instance.state === InstanceState.FAILED_QR_TIMEOUT) {
     return Promise.reject(new Error(`Instance in terminal state: ${instance.state}`));
   }
-  
-  // If promise already exists, return it
+  // Reuse existing promise so multiple callers share the same wait (tolerant of brief navigations).
   if (instance.readyPromise) {
     return instance.readyPromise;
   }
-  
-  // Create new promise
   instance.readyPromise = new Promise((resolve, reject) => {
     instance.readyResolver = resolve;
     instance.readyRejector = reject;
-    
-    // Timeout
+    // Long timeout so brief internal navigations (e.g. OPENING → CONNECTED) can complete before we reject.
     instance.readyTimeout = setTimeout(() => {
       instance.readyResolver = null;
       instance.readyRejector = null;
@@ -1903,9 +1958,18 @@ async function processQueueItem(instanceId, item) {
           console.log(`[${instanceId}] ✓ Sent ${item.type} (idempotency: ${item.idempotencyKey.substring(0, 20)}..., messageId: ${messageId})`);
           return true;
         } catch (error) {
-          item.attemptCount++;
           const errorMsg = error.message || String(error);
           item.lastError = errorMsg;
+
+          // No LID for user: WhatsApp client limitation (contact not resolved). Log once, don't retry.
+          if (errorMsg.includes('No LID for user')) {
+            console.warn(`[${instanceId}] Send failed (no retry): No LID for user — to: ${toHash}`);
+            await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
+            span.setAttribute('outcome', 'error');
+            return true; // Remove from queue
+          }
+
+          item.attemptCount++;
           instance.recordFailure();
 
           span.setAttribute('outcome', 'error');
@@ -1921,20 +1985,22 @@ async function processQueueItem(instanceId, item) {
             sentry.captureException(error, { instanceId, toHash, type: item.type, attempt: item.attemptCount });
           });
 
-          // Only treat as full disconnect when connection/context is clearly dead (triggers ensureReady/restart).
-          // Do NOT include getChat/Store undefined: those can be transient during page refresh; treating them
-          // as disconnect causes unnecessary restarts and can make WhatsApp show QR again even though session files are intact.
-          const isDisconnectError = errorMsg.includes('Session closed') ||
-                                    errorMsg.includes('disconnected') ||
-                                    errorMsg.includes('null') ||
-                                    errorMsg.includes('evaluate') ||
-                                    errorMsg.includes('Execution context was destroyed') ||
-                                    errorMsg.includes('Protocol error') ||
-                                    (error.name === 'ProtocolError') ||
-                                    errorMsg.includes('Failed to launch');
+          // Treat as disconnect: getChat, Cannot read properties of undefined, Execution context destroyed, Protocol error.
+          // On match: transitionTo(DISCONNECTED), clear poller, ensureReady(instanceId) for clean reconnect.
+          const isDisconnectError =
+            errorMsg.includes('Session closed') ||
+            errorMsg.includes('disconnected') ||
+            errorMsg.includes('Execution context was destroyed') ||
+            errorMsg.includes('Protocol error') ||
+            (error.name === 'ProtocolError') ||
+            errorMsg.includes('Failed to launch') ||
+            errorMsg.includes('getChat') ||
+            errorMsg.includes('Cannot read properties of undefined') ||
+            (errorMsg.includes('undefined') && (errorMsg.includes('read') || errorMsg.includes('getChat')));
 
           if (isDisconnectError) {
             console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
+            instance.clearMessageFallbackPoller();
             instance.transitionTo(InstanceState.DISCONNECTED, 'Disconnected during send');
 
             const backoffMs = Math.min(

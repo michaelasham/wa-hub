@@ -5,7 +5,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node src/index.js",
+    "dev": "concurrently -n backend,dashboard -c blue,green \"npm run dev:backend\" \"npm run dev:dashboard\"",
+    "dev:backend": "nodemon --watch src --ext js --delay 500 src/index.js",
+    "dev:dashboard": "npm run dev --prefix wa-hub-dashboard",
+    "dev:tunnel": "echo 'Optional: expose for QR scan. Run: npx cloudflared tunnel --url http://localhost:3000'",
     "test-webhook": "node scripts/test-webhook-server.js",
     "test-sentry": "node scripts/test-sentry.js",
     "launchpad:start": "node scripts/start-launchpad.js",
@@ -34,5 +37,9 @@
 "qrcode-terminal": "^0.12.0",
     "unzipper": "^0.10.11",
     "whatsapp-web.js": "^1.34.2"
-}
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "nodemon": "^3.1.0"
+  }
 }
