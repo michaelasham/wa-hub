@@ -1365,12 +1365,15 @@ function setupEventListeners(instanceId, client) {
     } catch (err) {
       inst.fallbackPollLastError = err.message;
       const msg = err && (err.message || String(err)) || '';
-      // Only treat as disconnect when context is clearly dead (not transient WA Web JS errors like "reading 'update'").
-      const isContextDead =
+      const msgHead = msg.slice(0, 200); // Main message only; avoid matching "getChat" in stack trace
+      // Only treat as disconnect when context is clearly dead. Ignore transient WA Web errors (e.g. "reading 'update'").
+      const isTransientWaError = /reading [\'"]update[\'"]/.test(msg);
+      const isContextDead = !isTransientWaError && (
         msg.includes('Execution context was destroyed') ||
         msg.includes('Protocol error') ||
         err.name === 'ProtocolError' ||
-        (msg.includes('getChat') && (msg.includes('undefined') || msg.includes('null')));
+        (msgHead.includes('getChat') && (msgHead.includes('undefined') || msgHead.includes('null')))
+      );
       if (isContextDead) {
         console.log(`[${instanceId}] Fallback poll: context dead (${msg.slice(0, 80)}), transitioning to DISCONNECTED`);
         inst.clearMessageFallbackPoller();
