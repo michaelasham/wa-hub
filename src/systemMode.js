@@ -27,10 +27,11 @@ function getSystemMode() {
 
 function setSystemMode(mode, meta = {}) {
   const prev = state.mode;
+  const nextSyncingId = mode === SystemMode.NORMAL ? null : (meta.syncingInstanceId ?? state.syncingInstanceId);
   state = {
     mode,
     since: new Date(),
-    syncingInstanceId: meta.syncingInstanceId ?? state.syncingInstanceId,
+    syncingInstanceId: nextSyncingId,
   };
   if (prev !== mode) {
     console.log(`[SystemMode] ${prev} -> ${mode}${state.syncingInstanceId ? ` (syncing: ${state.syncingInstanceId})` : ''}`);

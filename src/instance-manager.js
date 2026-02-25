@@ -1959,10 +1959,12 @@ async function processQueueItem(instanceId, item) {
           return true;
         } catch (error) {
           const errorMsg = error.message || String(error);
+          const errorStr = errorMsg + (error.stack || '');
           item.lastError = errorMsg;
 
           // No LID for user: WhatsApp client limitation (contact not resolved). Log once, don't retry.
-          if (errorMsg.includes('No LID for user')) {
+          // Check both message and stack (Puppeteer can serialize "Evaluation failed: Error: No LID for user" differently).
+          if (errorMsg.includes('No LID for user') || errorStr.includes('No LID for user')) {
             console.warn(`[${instanceId}] Send failed (no retry): No LID for user — to: ${toHash}`);
             await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
             span.setAttribute('outcome', 'error');
@@ -1970,6 +1972,12 @@ async function processQueueItem(instanceId, item) {
           }
 
           item.attemptCount++;
+          // Safety cap: stop retrying after 10 attempts so we don't flood logs (e.g. if error format changes).
+          if (item.attemptCount > 10) {
+            console.warn(`[${instanceId}] Send failed: giving up after ${item.attemptCount} attempts (last error: ${errorMsg.slice(0, 80)}...)`);
+            await idempotencyStore.markFailed(item.idempotencyKey, errorMsg);
+            return true; // Remove from queue
+          }
           instance.recordFailure();
 
           span.setAttribute('outcome', 'error');
@@ -2206,7 +2214,10 @@ async function createInstance(instanceId, name, webhookConfig) {
 
       await client.initialize();
 
-      instance.transitionTo(InstanceState.CONNECTING, `initializing (attempt ${attempt}/${maxAttempts})`);
+      // If QR already received during initialize(), stay in NEEDS_QR so dashboard shows correct state; do not overwrite with CONNECTING.
+      if (instance.state !== InstanceState.NEEDS_QR) {
+        instance.transitionTo(InstanceState.CONNECTING, `initializing (attempt ${attempt}/${maxAttempts})`);
+      }
       const { enableSyncLiteInterception } = require('./utils/syncLiteInterception');
       enableSyncLiteInterception(client, instanceId);
 
@@ -2654,6 +2665,8 @@ async function deleteInstance(instanceId) {
       result.warnings.push(`Save failed: ${err.message}`);
       console.error('[Persistence] Save failed:', err.message);
     });
+    // Recompute system mode so we leave low-power (SYNCING) when the deleted instance was the syncing one or when no instances remain.
+    systemMode.recomputeFromInstances(() => getAllInstances());
 
     if (client) {
       try {

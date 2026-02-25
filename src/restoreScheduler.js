@@ -71,8 +71,16 @@ async function processNext(createFn, markFailedFn) {
     await createFn(item);
     lastProcessedAt = new Date();
   } catch (err) {
+    const errMsg = err && (err.message || String(err)) || '';
     if (item.type === 'retry') {
-      console.error(`[RestoreScheduler] Retry ${item.instanceId} failed: ${err.message}`);
+      console.error(`[RestoreScheduler] Retry ${item.instanceId} failed: ${errMsg}`);
+      lastProcessedAt = new Date();
+      processing = false;
+      return;
+    }
+    // Session logged out (post_logout): instance already in ERROR; do not re-queue (user must re-scan QR).
+    if (errMsg.includes('Session logged out') || errMsg.includes('post_logout')) {
+      console.warn(`[RestoreScheduler] ${item.id} session logged out. Not re-queuing; instance in ERROR. Re-scan QR via dashboard.`);
       lastProcessedAt = new Date();
       processing = false;
       return;
@@ -80,9 +88,9 @@ async function processNext(createFn, markFailedFn) {
     const attempts = (item.attempts || 0) + 1;
     const maxAttempts = config.restoreMaxAttempts ?? 5;
     if (attempts >= maxAttempts) {
-      console.error(`[RestoreScheduler] ${item.id} failed after ${maxAttempts} attempts: ${err.message}. Marking ERROR.`);
+      console.error(`[RestoreScheduler] ${item.id} failed after ${maxAttempts} attempts: ${errMsg}. Marking ERROR.`);
       if (typeof markFailedFn === 'function') {
-        markFailedFn(item, `RESTORE_MAX_ATTEMPTS: ${err.message}`);
+        markFailedFn(item, `RESTORE_MAX_ATTEMPTS: ${errMsg}`);
       }
     } else {
       const backoffBase = config.restoreBackoffBaseMs ?? 15000;
@@ -90,7 +98,7 @@ async function processNext(createFn, markFailedFn) {
       item.attempts = attempts;
       item.nextAttemptAfter = new Date(Date.now() + backoffMs);
       queue.push(item);
-      console.warn(`[RestoreScheduler] ${item.id} attempt ${attempts}/${maxAttempts} failed. Re-queued (next in ${Math.round(backoffMs / 1000)}s). ${err.message}`);
+      console.warn(`[RestoreScheduler] ${item.id} attempt ${attempts}/${maxAttempts} failed. Re-queued (next in ${Math.round(backoffMs / 1000)}s). ${errMsg}`);
     }
     lastProcessedAt = new Date();
   } finally {
