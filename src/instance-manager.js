@@ -1365,13 +1365,12 @@ function setupEventListeners(instanceId, client) {
     } catch (err) {
       inst.fallbackPollLastError = err.message;
       const msg = err && (err.message || String(err)) || '';
-      // Treat as disconnect: getChat, Cannot read properties of undefined, Execution context destroyed, Protocol error.
+      // Only treat as disconnect when context is clearly dead (not transient WA Web JS errors like "reading 'update'").
       const isContextDead =
-        msg.includes('getChat') ||
-        msg.includes('Cannot read properties of undefined') ||
         msg.includes('Execution context was destroyed') ||
         msg.includes('Protocol error') ||
-        err.name === 'ProtocolError';
+        err.name === 'ProtocolError' ||
+        (msg.includes('getChat') && (msg.includes('undefined') || msg.includes('null')));
       if (isContextDead) {
         console.log(`[${instanceId}] Fallback poll: context dead (${msg.slice(0, 80)}), transitioning to DISCONNECTED`);
         inst.clearMessageFallbackPoller();
@@ -1993,8 +1992,7 @@ async function processQueueItem(instanceId, item) {
             sentry.captureException(error, { instanceId, toHash, type: item.type, attempt: item.attemptCount });
           });
 
-          // Treat as disconnect: getChat, Cannot read properties of undefined, Execution context destroyed, Protocol error.
-          // On match: transitionTo(DISCONNECTED), clear poller, ensureReady(instanceId) for clean reconnect.
+          // Treat as disconnect only when connection/context is clearly dead (avoid transient WA Web errors e.g. "reading 'update'").
           const isDisconnectError =
             errorMsg.includes('Session closed') ||
             errorMsg.includes('disconnected') ||
@@ -2002,9 +2000,7 @@ async function processQueueItem(instanceId, item) {
             errorMsg.includes('Protocol error') ||
             (error.name === 'ProtocolError') ||
             errorMsg.includes('Failed to launch') ||
-            errorMsg.includes('getChat') ||
-            errorMsg.includes('Cannot read properties of undefined') ||
-            (errorMsg.includes('undefined') && (errorMsg.includes('read') || errorMsg.includes('getChat')));
+            (errorMsg.includes('getChat') && (errorMsg.includes('undefined') || errorMsg.includes('null')));
 
           if (isDisconnectError) {
             console.error(`[${instanceId}] ✗ Disconnect error during send: ${errorMsg}`);
