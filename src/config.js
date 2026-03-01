@@ -142,6 +142,7 @@ const config = {
   // NEEDS_QR timeout & recovery: prevent global SYNCING from being held by stuck QR
   qrSyncGraceMs: parseInt(process.env.QR_SYNC_GRACE_MS || '30000', 10),       // NEEDS_QR keeps SYNCING only this long
   syncingMaxMs: parseInt(process.env.SYNCING_MAX_MS || '3600000', 10),         // CONNECTING/starting_browser keep SYNCING at most this long (default 1h)
+  forceNormalCooldownMs: parseInt(process.env.FORCE_NORMAL_COOLDOWN_MS || '1800000', 10), // After "Cancel low power", don't re-enter SYNCING for this long (default 30 min)
   qrStaleMs: parseInt(process.env.QR_STALE_MS || '90000', 10),                // no QR event for this long = stale
   qrTtlMs: parseInt(process.env.QR_TTL_MS || '300000', 10),                  // NEEDS_QR longer than this = timeout
   qrMaxRecoveryAttempts: parseInt(process.env.QR_MAX_RECOVERY_ATTEMPTS || '3', 10),

@@ -1224,7 +1224,7 @@ router.get('/system/status', async (req, res) => {
 
 /**
  * POST /system/force-normal
- * Force system mode to NORMAL (cancel low power mode). Same auth as GET /system/status.
+ * Force system mode to NORMAL and ignore syncing instances for cooldown (so low power doesn't kick back in). Same auth as GET /system/status.
  */
 router.post('/system/force-normal', (req, res) => {
   const secret = process.env.ADMIN_DEBUG_SECRET;
@@ -1232,8 +1232,9 @@ router.post('/system/force-normal', (req, res) => {
     return res.status(403).json(createErrorResponse('Forbidden', 403));
   }
   try {
-    systemMode.setSystemMode(systemMode.SystemMode.NORMAL, {});
-    res.json(createSuccessResponse({ mode: 'normal' }));
+    const cooldownMs = config.forceNormalCooldownMs ?? 30 * 60 * 1000;
+    systemMode.forceNormal(cooldownMs);
+    res.json(createSuccessResponse({ mode: 'normal', cooldownMinutes: Math.round(cooldownMs / 60000) }));
   } catch (error) {
     console.error('Error in /system/force-normal:', error);
     res.status(500).json(createErrorResponse(error.message, 500));

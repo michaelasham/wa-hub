@@ -19,11 +19,14 @@ let state = {
   syncingInstanceId: null,
 };
 
+/** After user clicks "Cancel low power mode", don't re-enter SYNCING until this time (ms). */
+let userForceNormalUntil = 0;
+
 const emitter = new EventEmitter();
 emitter.setMaxListeners(20);
 
 function getSystemMode() {
-  return { ...state };
+  return { ...state, userForceNormalUntil: userForceNormalUntil > 0 ? userForceNormalUntil : null };
 }
 
 function setSystemMode(mode, meta = {}) {
@@ -41,15 +44,27 @@ function setSystemMode(mode, meta = {}) {
   return state;
 }
 
-/** Call when an instance enters CONNECTING or NEEDS_QR. */
+/** Force NORMAL and ignore syncing instances for cooldownMs (so low power doesn't kick back in). */
+function forceNormal(cooldownMs = 0) {
+  userForceNormalUntil = cooldownMs > 0 ? Date.now() + cooldownMs : 0;
+  setSystemMode(SystemMode.NORMAL, {});
+  if (cooldownMs > 0) {
+    console.log(`[SystemMode] User forced NORMAL; will not re-enter SYNCING for ${Math.round(cooldownMs / 60000)} minutes`);
+  }
+}
+
+/** Call when an instance enters CONNECTING or NEEDS_QR. No-op if user recently forced NORMAL (cooldown). */
 function enterSyncing(instanceId) {
+  if (Date.now() < userForceNormalUntil) return;
   setSystemMode(SystemMode.SYNCING, { syncingInstanceId: instanceId });
 }
 
-/** Call when no instance is in CONNECTING/NEEDS_QR (recompute from instance list). */
+/** Call when no instance is in CONNECTING/NEEDS_QR (recompute from instance list). Respects user force-normal cooldown. */
 function recomputeFromInstances(getInstancesFn) {
   const instances = getInstancesFn();
   const now = Date.now();
+  if (now < userForceNormalUntil) return; // User cancelled low power; don't re-enter SYNCING until cooldown expires
+
   const graceMs = config.qrSyncGraceMs || 30000;
   const syncingMaxMs = config.syncingMaxMs || 3600000; // cap so stuck CONNECTING/starting_browser don't hold SYNCING forever
 
@@ -81,6 +96,7 @@ module.exports = {
   SystemMode,
   getSystemMode,
   setSystemMode,
+  forceNormal,
   enterSyncing,
   recomputeFromInstances,
   shouldRunBackgroundTask,
