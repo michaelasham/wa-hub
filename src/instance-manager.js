@@ -215,13 +215,18 @@ class InstanceContext {
     debugLog(this.id, 'state_transition', { from: oldState, to: newState, reason: reason || undefined });
     console.log(`[${ts}] [${this.id}] State transition: ${oldState} -> ${newState}${reason ? ` (${reason})` : ''}`);
 
-    if (newState === InstanceState.NEEDS_QR) {
+    const syncingStates = [InstanceState.STARTING_BROWSER, InstanceState.CONNECTING, InstanceState.NEEDS_QR];
+    const wasSyncing = syncingStates.includes(oldState);
+    const isSyncing = syncingStates.includes(newState);
+
+    if (newState === InstanceState.NEEDS_QR && oldState !== InstanceState.NEEDS_QR) {
       this.needsQrSince = new Date();
       this.lastQrAt = null;
       this.qrRecoveryAttempts = 0;
       this.nextQrRecoveryAt = null;
     }
-    if (newState === InstanceState.STARTING_BROWSER || newState === InstanceState.CONNECTING || newState === InstanceState.NEEDS_QR) {
+    // Only enter syncing when moving FROM a non-syncing state TO a syncing state (avoids NEEDS_QR→NEEDS_QR on each QR refresh resetting low-power grace)
+    if (isSyncing && !wasSyncing) {
       systemMode.enterSyncing(this.id);
     }
     systemMode.recomputeFromInstances(() => Array.from(instances.values()));
