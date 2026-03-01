@@ -1195,6 +1195,24 @@ function setupEventListeners(instanceId, client) {
       console.log(`[${ts}] [${instanceId}] Event: qr (ignored, already authenticated, waiting for ready)`);
       return;
     }
+    // Already in NEEDS_QR: only refresh QR image and lastQrAt; do not reset ready watchdog or transition again (stops watchdog start from resetting on every QR refresh).
+    if (instance.state === InstanceState.NEEDS_QR) {
+      instance.lastQrAt = new Date();
+      qrToBase64(qr).then((qrBase64) => {
+        if (guard()) return;
+        instance.qrCode = qrBase64;
+        instance.lastQrUpdate = new Date();
+        void forwardWebhook(instanceId, 'qr', { qr: qrBase64 }).catch(err => recordWebhookError(instanceId, err));
+      }).catch((error) => {
+        if (guard()) return;
+        console.error(`[${instanceId}] Error processing QR:`, error);
+        instance.lastError = error.message;
+        instance.lastErrorAt = new Date();
+        instance.lastErrorStack = error.stack;
+        void forwardWebhook(instanceId, 'qr', { error: error.message }).catch(err => recordWebhookError(instanceId, err));
+      });
+      return;
+    }
     instance.lastLifecycleEvent = 'qr';
     instance.lastLifecycleEventAt = new Date();
     console.log(`[${ts}] [${instanceId}] Event: qr (current state=${instance.state})`);
