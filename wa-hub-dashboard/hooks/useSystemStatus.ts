@@ -61,7 +61,7 @@ export function useSystemStatus() {
     return () => clearInterval(id);
   }, [fetchStatus]);
 
-  return { data, error, isLoading };
+  return { data, error, isLoading, refetch: fetchStatus };
 }
 
 /** Format ISO since date as mm:ss duration from now. */

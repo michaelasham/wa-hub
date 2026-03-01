@@ -27,11 +27,12 @@ export default function HomePage() {
   const reachable = useWaHubReachable();
   const { health } = useHealth();
   const { instances, loading, error, refresh } = useInstances();
-  const { data: systemStatus, error: systemStatusError } = useSystemStatus();
+  const { data: systemStatus, error: systemStatusError, refetch: refetchSystemStatus } = useSystemStatus();
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [fixingWebhooks, setFixingWebhooks] = useState(false);
   const [fixWebhooksResult, setFixWebhooksResult] = useState<string | null>(null);
   const [durationTick, setDurationTick] = useState(0);
+  const [cancellingLowPower, setCancellingLowPower] = useState(false);
 
   const isSyncing = systemStatus?.mode === 'syncing';
   useEffect(() => {
@@ -214,7 +215,28 @@ export default function HomePage() {
         )}
 
         {isSyncing && systemStatus && (
-          <Banner tone="warning" title="Low Power Mode is ON">
+          <Banner
+            tone="warning"
+            title="Low Power Mode is ON"
+            action={{
+              content: 'Cancel low power mode',
+              loading: cancellingLowPower,
+              onAction: async () => {
+                setCancellingLowPower(true);
+                try {
+                  const res = await fetch('/api/system/force-normal', { method: 'POST', credentials: 'include' });
+                  const json = await res.json().catch(() => ({}));
+                  if (res.ok) {
+                    refetchSystemStatus();
+                  } else {
+                    console.error('Force normal failed:', json?.error ?? res.statusText);
+                  }
+                } finally {
+                  setCancellingLowPower(false);
+                }
+              },
+            }}
+          >
             <p>
               Outbound actions are queued while <strong>{syncingInstanceId ?? 'an instance'}</strong> syncs.
               {' '}Since: <strong>{sinceDuration}</strong>

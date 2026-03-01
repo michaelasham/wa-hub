@@ -31,7 +31,8 @@ export default function InstanceDetailPage() {
   const [loading, setLoading] = useState(true);
   const [userMenuActive, setUserMenuActive] = useState(false);
   const [navigationActive, setNavigationActive] = useState(false);
-  const { data: systemStatus, error: systemStatusError } = useSystemStatus();
+  const { data: systemStatus, error: systemStatusError, refetch: refetchSystemStatus } = useSystemStatus();
+  const [cancellingLowPower, setCancellingLowPower] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     const res = await waHubRequest<{ clientStatus?: unknown }>({
@@ -202,7 +203,23 @@ export default function InstanceDetailPage() {
         )}
 
         {systemStatus?.mode === 'syncing' && (
-          <Banner tone="warning" title="Low Power Mode is ON">
+          <Banner
+            tone="warning"
+            title="Low Power Mode is ON"
+            action={{
+              content: 'Cancel low power mode',
+              loading: cancellingLowPower,
+              onAction: async () => {
+                setCancellingLowPower(true);
+                try {
+                  const res = await fetch('/api/system/force-normal', { method: 'POST', credentials: 'include' });
+                  if (res.ok) refetchSystemStatus();
+                } finally {
+                  setCancellingLowPower(false);
+                }
+              },
+            }}
+          >
             <p>
               Outbound actions are queued while <strong>{systemStatus.syncingInstanceId ?? 'an instance'}</strong> syncs.
               {' '}Since: <strong>{formatSinceDuration(systemStatus.since)}</strong>

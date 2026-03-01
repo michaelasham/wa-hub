@@ -1222,6 +1222,24 @@ router.get('/system/status', async (req, res) => {
   }
 });
 
+/**
+ * POST /system/force-normal
+ * Force system mode to NORMAL (cancel low power mode). Same auth as GET /system/status.
+ */
+router.post('/system/force-normal', (req, res) => {
+  const secret = process.env.ADMIN_DEBUG_SECRET;
+  if (secret && req.headers['x-admin-debug-secret'] !== secret) {
+    return res.status(403).json(createErrorResponse('Forbidden', 403));
+  }
+  try {
+    systemMode.setSystemMode(systemMode.SystemMode.NORMAL, {});
+    res.json(createSuccessResponse({ mode: 'normal' }));
+  } catch (error) {
+    console.error('Error in /system/force-normal:', error);
+    res.status(500).json(createErrorResponse(error.message, 500));
+  }
+});
+
 // ----- Launchpad internal API (only when IS_LAUNCHPAD=true) -----
 function launchpadSecretAuth(req, res, next) {
   const secret = config.launchpadInternalSecret;
