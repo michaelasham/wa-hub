@@ -110,7 +110,7 @@ const InstanceState = {
 };
 ```
 
-**Note:** There is no `SYNCING` in InstanceState. “Syncing” is a **system mode** (normal vs syncing) in `src/systemMode.js`: when any instance is in CONNECTING, NEEDS_QR, or STARTING_BROWSER, system mode is `syncing`; when all are READY or terminal, it is `normal`.
+**Note:** There is no `SYNCING` in InstanceState. “Syncing” is a **system mode** (normal vs syncing) in `src/systemMode.js`: when any instance is in CONNECTING, NEEDS_QR, or STARTING_BROWSER, system mode is `syncing`; when all are READY or terminal, it is `normal`. NEEDS_QR only counts for `QR_SYNC_GRACE_MS`; CONNECTING/STARTING_BROWSER only count for `SYNCING_MAX_MS` (default 1h), so a stuck instance does not keep the system in low power mode forever. System mode is recomputed on every state transition and every 5 minutes.
 
 ### How transitions happen
 

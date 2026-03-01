@@ -1,7 +1,8 @@
 /**
  * Global system mode for low-power during QR/auth/sync.
  * NORMAL = no instance in connecting/needs_qr (with grace for needs_qr); SYNCING = at least one instance in those states.
- * NEEDS_QR only keeps SYNCING for QR_SYNC_GRACE_MS so a stuck instance doesn't hold the system.
+ * NEEDS_QR only keeps SYNCING for QR_SYNC_GRACE_MS. CONNECTING/starting_browser only keep SYNCING for SYNCING_MAX_MS (default 1h)
+ * so a stuck instance doesn't hold the system in low power mode forever.
  */
 
 const EventEmitter = require('events');
@@ -50,9 +51,13 @@ function recomputeFromInstances(getInstancesFn) {
   const instances = getInstancesFn();
   const now = Date.now();
   const graceMs = config.qrSyncGraceMs || 30000;
+  const syncingMaxMs = config.syncingMaxMs || 3600000; // cap so stuck CONNECTING/starting_browser don't hold SYNCING forever
 
   const syncing = instances.find((i) => {
-    if (i.state === 'starting_browser' || i.state === 'connecting') return true;
+    if (i.state === 'starting_browser' || i.state === 'connecting') {
+      const since = i.lastStateChangeAt ? new Date(i.lastStateChangeAt).getTime() : 0;
+      return since > 0 && (now - since) <= syncingMaxMs;
+    }
     if (i.state === 'needs_qr') {
       const since = i.needsQrSince ? new Date(i.needsQrSince).getTime() : 0;
       return since > 0 && (now - since) <= graceMs;

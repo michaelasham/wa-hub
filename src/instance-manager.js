@@ -2584,6 +2584,10 @@ function getAllInstances() {
   return Array.from(instances.values());
 }
 
+// Periodic recompute of system mode so a stuck CONNECTING/starting_browser doesn't keep SYNCING forever (syncingMaxMs cap)
+const SYNCING_RECOMPUTE_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+setInterval(() => systemMode.recomputeFromInstances(() => getAllInstances()), SYNCING_RECOMPUTE_INTERVAL_MS);
+
 /**
  * Purge LocalAuth session storage for an instance from disk.
  * Safe to call even when instance/client doesn't exist (idempotent).
